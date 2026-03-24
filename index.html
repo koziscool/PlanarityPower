@@ -1,0 +1,36 @@
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+    <title>Planarity - Jason Davies</title>
+    <link href="planarity.css" rel="stylesheet">
+    <link href="./media/style.css" rel="stylesheet">
+    <link href="./media/css/button.css" rel="stylesheet">
+    <script src="./media/js/d3.min.js"></script>
+  </head>
+  <body>
+    <div style="display: flex; justify-content: space-between; align-items: start;">
+      <div style="flex: 1;">
+        <h1>Planarity</h1>
+        <p>Can you untangle the graph?  See if you can position the vertices so that no two lines cross.
+        <p>Number of line crossings detected: <span id="count">0</span> | <span style="font-style: italic"><span id="move-count">0 moves</span> taken in <span id="timer">0</span>s.</span>
+      </div>
+      <div id="controls" style="padding: 20px; border-left: 1px solid #ccc; min-width: 300px;">
+        <p><label for="nodes">Number of vertices:</label>
+          <input type="number" value="50" id="nodes" min="4">
+        <p><label for="canvas-width">Canvas width:</label>
+          <input type="number" value="1000" id="canvas-width" min="800" max="10000">
+        <p><label for="canvas-height">Canvas height:</label>
+          <input type="number" value="600" id="canvas-height" min="600" max="10000">
+        <p><button id="generate" class="first last">Generate new, random graph</button>
+        <p><button id="save" class="first">Save Game</button>
+          <button id="load">Load Game</button>
+        <p><button id="resume" class="first last">Resume Last Game</button>
+        <p><label for="intersections"><input type="checkbox" id="intersections" checked> Highlight non-intersecting lines</label>.
+      </div>
+    </div>
+    <div id="vis"><img src="planarity.png"></div>
+    <script src="planarity.js"></script>
+  </body>
+</html>

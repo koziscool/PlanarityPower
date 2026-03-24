@@ -17,16 +17,25 @@
         <p>Number of line crossings detected: <span id="count">0</span> | <span style="font-style: italic"><span id="move-count">0 moves</span> taken in <span id="timer">0</span>s.</span>
       </div>
       <div id="controls" style="padding: 20px; border-left: 1px solid #ccc; min-width: 300px;">
-        <p><label for="nodes">Number of vertices:</label>
-          <input type="number" value="50" id="nodes" min="4">
-        <p><label for="canvas-width">Canvas width:</label>
-          <input type="number" value="1000" id="canvas-width" min="800" max="10000">
-        <p><label for="canvas-height">Canvas height:</label>
-          <input type="number" value="600" id="canvas-height" min="600" max="10000">
-        <p><button id="generate" class="first last">Generate new, random graph</button>
-        <p><button id="save" class="first">Save Game</button>
-          <button id="load">Load Game</button>
-        <p><button id="resume" class="first last">Resume Last Game</button>
+        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 10px 0;">
+          <label>Vertices: <input type="number" value="50" id="nodes" min="4" style="width: 60px;"></label>
+          <label>W: <input type="number" value="1000" id="canvas-width" min="800" max="10000" style="width: 70px;"></label>
+          <label>H: <input type="number" value="600" id="canvas-height" min="600" max="10000" style="width: 70px;"></label>
+          <button id="generate" class="first last">Generate</button>
+        </div>
+        <div id="saved-games-section" style="margin-top: 10px;">
+          <select id="saved-games" style="width: 100%; padding: 5px;">
+            <option value="">-- Select a game --</option>
+          </select>
+          <div style="display: flex; gap: 5px; margin-top: 5px; align-items: center;">
+            <input type="text" id="save-name" placeholder="Name..." style="width: 110px; padding: 5px;">
+            <button id="save" class="first">Save</button>
+            <button id="resume">Resume</button>
+            <button id="load">Load</button>
+            <button id="delete-save" class="last">Delete</button>
+          </div>
+        </div>
+        <div id="status-message" style="margin: 10px 0; padding: 8px; display: none; border-radius: 4px;"></div>
         <p><label for="intersections"><input type="checkbox" id="intersections" checked> Highlight non-intersecting lines</label>.
       </div>
     </div>

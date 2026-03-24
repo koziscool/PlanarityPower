@@ -208,12 +208,34 @@ function cross(a, b) {
   return a[0] * b[1] - a[1] * b[0];
 }
 
-// Save game state to localStorage
-function saveGame() {
-  var state = {
+// Show inline status message
+function showStatus(message, isError) {
+  var el = d3.select("#status-message");
+  el.text(message)
+    .style("display", "block")
+    .style("background-color", isError ? "#ffcccc" : "#ccffcc")
+    .style("color", isError ? "#990000" : "#006600");
+  setTimeout(function() {
+    el.style("display", "none");
+  }, 3000);
+}
+
+// Get all saved games from localStorage
+function getSavedGames() {
+  var saved = localStorage.getItem('planaritySavedGames');
+  return saved ? JSON.parse(saved) : [];
+}
+
+// Save the list of games to localStorage
+function setSavedGames(games) {
+  localStorage.setItem('planaritySavedGames', JSON.stringify(games));
+}
+
+// Create a game state object
+function createGameState() {
+  return {
     nodes: graph.nodes,
     links: graph.links.map(function(link) {
-      // Store links as indices to avoid circular references
       return [
         graph.nodes.indexOf(link[0]),
         graph.nodes.indexOf(link[1])
@@ -224,23 +246,50 @@ function saveGame() {
     nodeCount: +d3.select("#nodes").property("value"),
     highlightIntersections: highlightIntersections,
     canvasWidth: w,
-    canvasHeight: h
+    canvasHeight: h,
+    intersections: count
   };
-  localStorage.setItem('planarityGame', JSON.stringify(state));
-  alert('Game saved!');
 }
 
-// Load game state from localStorage
-function loadGame() {
-  var savedState = localStorage.getItem('planarityGame');
-  if (!savedState) {
-    alert('No saved game found!');
-    return false;
+// Update the saved games dropdown
+function updateSavedGamesDropdown() {
+  var games = getSavedGames();
+  var select = d3.select("#saved-games");
+  
+  select.selectAll("option").remove();
+  select.append("option").attr("value", "").text("-- Select a game (" + games.length + " saved) --");
+  
+  games.forEach(function(game, index) {
+    var date = new Date(game.savedAt);
+    var dateStr = date.toLocaleDateString() + " " + date.toLocaleTimeString();
+    var label = game.name + " - " + game.state.nodeCount + " nodes, " + 
+                game.state.intersections + " crossings, " + game.state.moves + " moves (" + dateStr + ")";
+    select.append("option").attr("value", index).text(label);
+  });
+}
+
+// Save game to a new slot
+function saveGame() {
+  var nameInput = d3.select("#save-name");
+  var name = nameInput.property("value").trim();
+  if (!name) {
+    name = "Game " + (getSavedGames().length + 1);
   }
+  
+  var games = getSavedGames();
+  games.unshift({
+    name: name,
+    savedAt: Date.now(),
+    state: createGameState()
+  });
+  setSavedGames(games);
+  updateSavedGamesDropdown();
+  nameInput.property("value", "");
+  showStatus('Game saved as "' + name + '"!', false);
+}
 
-  var state = JSON.parse(savedState);
-
-  // Reconstruct the graph
+// Load a game state
+function loadGameState(state) {
   graph = {
     nodes: state.nodes,
     links: state.links.map(function(linkIndices) {
@@ -248,14 +297,12 @@ function loadGame() {
     })
   };
 
-  // Restore game state
   moves = state.moves;
   start = state.startTime;
   highlightIntersections = state.highlightIntersections;
   d3.select("#nodes").property("value", state.nodeCount);
   d3.select("#intersections").property("checked", highlightIntersections);
 
-  // Restore canvas dimensions
   if (state.canvasWidth && state.canvasHeight) {
     d3.select("#canvas-width").property("value", state.canvasWidth);
     d3.select("#canvas-height").property("value", state.canvasHeight);
@@ -264,51 +311,75 @@ function loadGame() {
 
   moveCounter.text(moves + " move" + (moves !== 1 ? "s" : ""));
   update();
+}
 
+// Load selected game from dropdown
+function loadSelectedGame() {
+  var index = d3.select("#saved-games").property("value");
+  if (index === "") {
+    showStatus("Please select a game to load.", true);
+    return false;
+  }
+  
+  var games = getSavedGames();
+  loadGameState(games[+index].state);
+  showStatus("Game loaded!", false);
   return true;
 }
 
-// Check for saved game on load
-function checkForSavedGame() {
-  return localStorage.getItem('planarityGame') !== null;
+// Delete selected game
+function deleteSelectedGame() {
+  var index = d3.select("#saved-games").property("value");
+  if (index === "") {
+    showStatus("Please select a game to delete.", true);
+    return;
+  }
+  
+  var games = getSavedGames();
+  var name = games[+index].name;
+  games.splice(+index, 1);
+  setSavedGames(games);
+  updateSavedGamesDropdown();
+  showStatus('Deleted "' + name + '"', false);
 }
 
-// Auto-save on every move
+// Check for auto-saved game
+function checkForSavedGame() {
+  return localStorage.getItem('planarityCurrentGame') !== null;
+}
+
+// Wrap update to auto-save after each change
 var originalUpdate = update;
 update = function() {
   originalUpdate();
-  // Auto-save after each update
-  if (moves > 0) {
-    var state = {
-      nodes: graph.nodes,
-      links: graph.links.map(function(link) {
-        return [
-          graph.nodes.indexOf(link[0]),
-          graph.nodes.indexOf(link[1])
-        ];
-      }),
-      moves: moves,
-      startTime: start,
-      nodeCount: +d3.select("#nodes").property("value"),
-      highlightIntersections: highlightIntersections,
-      canvasWidth: w,
-      canvasHeight: h
-    };
-    localStorage.setItem('planarityGame', JSON.stringify(state));
-  }
+  autoSave();
 };
 
-// Wire up save/load buttons
+// Resume auto-saved game
+function resumeGame() {
+  var savedState = localStorage.getItem('planarityCurrentGame');
+  // Migration: check old key
+  if (!savedState) {
+    savedState = localStorage.getItem('planarityGame');
+  }
+  if (!savedState) {
+    showStatus('No game in progress to resume!', true);
+    return;
+  }
+  loadGameState(JSON.parse(savedState));
+  showStatus('Resumed last game!', false);
+}
+
+// Auto-save current game
+function autoSave() {
+  localStorage.setItem('planarityCurrentGame', JSON.stringify(createGameState()));
+}
+
+// Initialize saved games dropdown on load
+updateSavedGamesDropdown();
+
+// Wire up buttons
 d3.select("#save").on("click", saveGame);
-d3.select("#load").on("click", function() {
-  if (loadGame()) {
-    alert('Game loaded!');
-  }
-});
-d3.select("#resume").on("click", function() {
-  if (checkForSavedGame()) {
-    loadGame();
-  } else {
-    alert('No saved game to resume!');
-  }
-});
+d3.select("#load").on("click", loadSelectedGame);
+d3.select("#delete-save").on("click", deleteSelectedGame);
+d3.select("#resume").on("click", resumeGame);

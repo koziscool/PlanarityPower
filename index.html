@@ -13,8 +13,8 @@
     <div style="display: flex; justify-content: space-between; align-items: start;">
       <div style="flex: 1;">
         <h1>Planarity</h1>
-        <p>Can you untangle the graph?  See if you can position the vertices so that no two lines cross.
-        <p>Number of line crossings detected: <span id="count">0</span> | <span style="font-style: italic"><span id="move-count">0 moves</span> taken in <span id="timer">0</span>s.</span>
+        <p>Can you untangle the graph? See if you can position the vertices so that no two lines cross.
+        <p>Crossings: <span id="count">0</span> | <span id="move-count">0 moves</span> in <span id="timer">0</span>s
       </div>
       <div id="controls" style="padding: 20px; border-left: 1px solid #ccc; min-width: 300px;">
         <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 10px 0;">
@@ -28,18 +28,44 @@
             <option value="">-- Select a game --</option>
           </select>
           <div style="display: flex; gap: 5px; margin-top: 5px; align-items: center;">
-            <input type="text" id="save-name" placeholder="Name..." style="width: 110px; padding: 5px;">
-            <button id="save" class="first">Save</button>
+            <button id="new-game" class="first">New</button>
+            <input type="text" id="save-name" placeholder="Name..." style="width: 100px; padding: 5px;">
+            <button id="save">Save</button>
             <button id="resume">Resume</button>
             <button id="load">Load</button>
             <button id="delete-save" class="last">Delete</button>
           </div>
         </div>
-        <div id="status-message" style="margin: 10px 0; padding: 8px; display: none; border-radius: 4px;"></div>
+        <div style="display: flex; gap: 5px; margin-top: 10px; align-items: center;">
+          <span>Solver:</span>
+          <button id="solver-step" class="first">Step</button>
+          <button id="solver-run">Run</button>
+          <button id="solver-stop" class="last">Stop</button>
+          <label style="margin-left: 10px;">Speed: <input type="range" id="solver-speed" min="1" max="100" value="50" style="width: 80px;"></label>
+        </div>
         <p><label for="intersections"><input type="checkbox" id="intersections" checked> Highlight non-intersecting lines</label>.
       </div>
     </div>
-    <div id="vis"><img src="planarity.png"></div>
+    <div style="display: flex; align-items: flex-start;">
+      <div id="vis"></div>
+      <div id="analytics" style="padding: 15px; min-width: 200px; font-family: monospace; font-size: 13px; background: #f5f5f5; border-left: 1px solid #ccc;">
+        <div style="font-weight: bold; margin-bottom: 10px;">Solver Analytics</div>
+        <div id="analytics-content">
+          <div>Status: <span id="a-status">idle</span></div>
+          <div>Crossings: <span id="a-crossings">-</span></div>
+          <div>---</div>
+          <div>Node: <span id="a-node">-</span></div>
+          <div>Node crossings: <span id="a-node-crossings">-</span></div>
+          <div>Candidates tried: <span id="a-candidates">-</span></div>
+          <div>Positions sampled: <span id="a-samples">-</span></div>
+          <div>---</div>
+          <div>Best improvement: <span id="a-improvement">-</span></div>
+          <div>Move from: <span id="a-from">-</span></div>
+          <div>Move to: <span id="a-to">-</span></div>
+        </div>
+      </div>
+    </div>
+    <div id="status-message" style="position: fixed; bottom: 10px; left: 10px; padding: 8px 15px; display: none; border-radius: 4px; font-size: 13px;"></div>
     <script src="planarity.js"></script>
   </body>
 </html>

@@ -8,7 +8,7 @@ var w = 1000,
     moves = 0,
     highlightIntersections = true,
     count = 0, // intersections
-    graph = scramble(planarGraph(50));
+    graph = { nodes: [], links: [] };
 
 d3.select("#vis").selectAll("*").remove();
 
@@ -26,6 +26,7 @@ var lines = vis.append("g"),
     timer = d3.select("#timer");
 
 d3.select("#generate").on("click", generate);
+d3.select("#new-game").on("click", generate);
 d3.select("#intersections").on("change", function() {
   highlightIntersections = this.checked;
   update();
@@ -41,7 +42,8 @@ d3.select("#canvas-height").on("change", function() {
   update();
 });
 
-generate();
+// Start with blank canvas
+resizeCanvas();
 
 d3.timer(function() {
   if (count) timer.text(format((+new Date - start) / 1000));
@@ -383,3 +385,350 @@ d3.select("#save").on("click", saveGame);
 d3.select("#load").on("click", loadSelectedGame);
 d3.select("#delete-save").on("click", deleteSelectedGame);
 d3.select("#resume").on("click", resumeGame);
+
+// ============ SOLVER ============
+
+var solverRunning = false;
+var solverTimeout = null;
+
+// Analytics tracking
+var analytics = {
+  status: 'idle',
+  crossings: 0,
+  nodeIndex: -1,
+  nodeCrossings: 0,
+  candidatesTried: 0,
+  samplesTested: 0,
+  improvement: 0,
+  fromPos: [0, 0],
+  toPos: [0, 0]
+};
+
+function updateAnalytics() {
+  d3.select("#a-status").text(analytics.status);
+  d3.select("#a-crossings").text(count);
+  d3.select("#a-node").text(analytics.nodeIndex >= 0 ? analytics.nodeIndex : '-');
+  d3.select("#a-node-crossings").text(analytics.nodeCrossings || '-');
+  d3.select("#a-candidates").text(analytics.candidatesTried || '-');
+  d3.select("#a-samples").text(analytics.samplesTested || '-');
+  d3.select("#a-improvement").text(analytics.improvement > 0 ? '-' + analytics.improvement : '-');
+  d3.select("#a-from").text(analytics.fromPos[0] ? 
+    '(' + analytics.fromPos[0].toFixed(3) + ', ' + analytics.fromPos[1].toFixed(3) + ')' : '-');
+  d3.select("#a-to").text(analytics.toPos[0] ? 
+    '(' + analytics.toPos[0].toFixed(3) + ', ' + analytics.toPos[1].toFixed(3) + ')' : '-');
+}
+
+// Count intersections involving a specific node
+function nodeIntersectionCount(node) {
+  var nodeCount = 0;
+  graph.links.forEach(function(link) {
+    if (link[0] === node || link[1] === node) {
+      if (link.intersection) nodeCount++;
+    }
+  });
+  return nodeCount;
+}
+
+// Get nodes sorted by intersection count (worst first)
+function getNodesByIntersections() {
+  var nodesWithCounts = graph.nodes.map(function(node) {
+    return { node: node, count: nodeIntersectionCount(node) };
+  });
+  
+  nodesWithCounts.sort(function(a, b) { return b.count - a.count; });
+  
+  return nodesWithCounts.filter(function(n) { return n.count > 0; });
+}
+
+// Animate a node moving from current position to target
+function animateNode(node, targetX, targetY, callback) {
+  var startX = node[0];
+  var startY = node[1];
+  var duration = 400; // ms (slowed down 30%)
+  var startTime = Date.now();
+  
+  function frame() {
+    var elapsed = Date.now() - startTime;
+    var t = Math.min(1, elapsed / duration);
+    // Ease out quad
+    t = t * (2 - t);
+    
+    node[0] = startX + (targetX - startX) * t;
+    node[1] = startY + (targetY - startY) * t;
+    
+    // Update analytics with current position during animation
+    analytics.toPos = [node[0], node[1]];
+    analytics.crossings = intersections(graph.links);
+    updateAnalytics();
+    
+    update();
+    
+    if (t < 1) {
+      requestAnimationFrame(frame);
+    } else {
+      node[0] = targetX;
+      node[1] = targetY;
+      update();
+      if (callback) callback();
+    }
+  }
+  
+  requestAnimationFrame(frame);
+}
+
+// Try to find the best move for a given node
+function findBestMoveForNode(node, nodeIndex) {
+  var originalX = node[0];
+  var originalY = node[1];
+  var originalCount = intersections(graph.links);
+  
+  var bestX = originalX;
+  var bestY = originalY;
+  var bestCount = originalCount;
+  var sampleCount = 0;
+  
+  // Try a grid of positions
+  var gridSize = 5;
+  for (var gx = 0; gx < gridSize; gx++) {
+    for (var gy = 0; gy < gridSize; gy++) {
+      node[0] = (gx + 0.5) / gridSize;
+      node[1] = (gy + 0.5) / gridSize;
+      sampleCount++;
+      var newCount = intersections(graph.links);
+      
+      if (newCount < bestCount) {
+        bestCount = newCount;
+        bestX = node[0];
+        bestY = node[1];
+      }
+    }
+  }
+  
+  // Sample random positions
+  var samples = 10;
+  for (var i = 0; i < samples; i++) {
+    node[0] = Math.random();
+    node[1] = Math.random();
+    sampleCount++;
+    var newCount = intersections(graph.links);
+    
+    if (newCount < bestCount) {
+      bestCount = newCount;
+      bestX = node[0];
+      bestY = node[1];
+    }
+  }
+  
+  // Try positions near other nodes
+  graph.nodes.forEach(function(other) {
+    if (other !== node) {
+      // Try exact position of other node
+      node[0] = other[0] + (Math.random() - 0.5) * 0.05;
+      node[1] = other[1] + (Math.random() - 0.5) * 0.05;
+      node[0] = Math.max(0.01, Math.min(0.99, node[0]));
+      node[1] = Math.max(0.01, Math.min(0.99, node[1]));
+      sampleCount++;
+      
+      var newCount = intersections(graph.links);
+      if (newCount < bestCount) {
+        bestCount = newCount;
+        bestX = node[0];
+        bestY = node[1];
+      }
+    }
+  });
+  
+  // Restore original position
+  node[0] = originalX;
+  node[1] = originalY;
+  intersections(graph.links);
+  
+  if (bestCount < originalCount) {
+    return { 
+      node: node, 
+      nodeIndex: nodeIndex,
+      x: bestX, 
+      y: bestY, 
+      fromX: originalX,
+      fromY: originalY,
+      improvement: originalCount - bestCount,
+      samples: sampleCount
+    };
+  }
+  return null;
+}
+
+// Try to improve position of a single node
+function solverStep(callback) {
+  // Check if graph exists
+  if (!graph.nodes || graph.nodes.length === 0) {
+    showStatus("No graph - click New Graph first", true);
+    if (callback) callback(false);
+    return;
+  }
+  
+  // Refresh intersection flags and count
+  count = intersections(graph.links);
+  
+  analytics.crossings = count;
+  analytics.status = 'searching';
+  updateAnalytics();
+  
+  if (count === 0) {
+    analytics.status = 'solved';
+    updateAnalytics();
+    showStatus("Already solved!", false);
+    stopSolver();
+    if (callback) callback(false);
+    return;
+  }
+  
+  var candidates = getNodesByIntersections();
+  analytics.candidatesTried = candidates.length;
+  updateAnalytics();
+  
+  if (candidates.length === 0) {
+    analytics.status = 'stuck';
+    updateAnalytics();
+    showStatus("No nodes with intersections (count=" + count + ")", true);
+    stopSolver();
+    if (callback) callback(false);
+    return;
+  }
+  
+  // Try each candidate node, take the best improvement
+  var bestMove = null;
+  var totalSamples = 0;
+  var candidatesTried = Math.min(candidates.length, 5);
+  var movesFound = 0;
+  
+  for (var i = 0; i < candidatesTried; i++) {
+    var nodeIndex = graph.nodes.indexOf(candidates[i].node);
+    var move = findBestMoveForNode(candidates[i].node, nodeIndex);
+    if (move) {
+      totalSamples += move.samples;
+      movesFound++;
+      if (!bestMove || move.improvement > bestMove.improvement) {
+        bestMove = move;
+      }
+    } else {
+      totalSamples += 84 + graph.nodes.length; // approx samples tried
+    }
+  }
+  
+  analytics.candidatesTried = candidatesTried + " (" + movesFound + " improved)";
+  analytics.samplesTested = totalSamples;
+  
+  if (bestMove) {
+    analytics.status = 'moving';
+    analytics.nodeIndex = bestMove.nodeIndex;
+    analytics.nodeCrossings = nodeIntersectionCount(bestMove.node);
+    analytics.improvement = bestMove.improvement;
+    analytics.fromPos = [bestMove.fromX, bestMove.fromY];
+    analytics.toPos = [bestMove.x, bestMove.y];
+    updateAnalytics();
+    
+    showStatus("Moving node " + bestMove.nodeIndex + " (improvement: -" + bestMove.improvement + ")", false);
+    
+    update();
+    animateNode(bestMove.node, bestMove.x, bestMove.y, function() {
+      moves++;
+      moveCounter.text(moves + " move" + (moves !== 1 ? "s" : ""));
+      analytics.status = 'idle';
+      analytics.crossings = count;
+      updateAnalytics();
+      if (callback) callback(true);
+    });
+  } else {
+    analytics.status = 'stuck';
+    updateAnalytics();
+    update();
+    showStatus("No improvement found (" + candidatesTried + " nodes, " + totalSamples + " positions tried)", true);
+    if (callback) callback(false);
+  }
+}
+
+// Run solver continuously
+function runSolver() {
+  if (solverRunning) return;
+  solverRunning = true;
+  
+  function step() {
+    if (!solverRunning) return;
+    
+    solverStep(function(improved) {
+      if (!solverRunning) return;
+      
+      if (improved && count > 0) {
+        var speed = +d3.select("#solver-speed").property("value");
+        var delay = Math.max(5, 200 - speed * 2);
+        solverTimeout = setTimeout(step, delay);
+      } else {
+        stopSolver();
+        if (count === 0) {
+          showStatus("Solved!", false);
+        } else {
+          showStatus("Stuck at " + count + " crossings", true);
+        }
+      }
+    });
+  }
+  
+  step();
+}
+
+// Stop solver
+function stopSolver() {
+  solverRunning = false;
+  if (solverTimeout) {
+    clearTimeout(solverTimeout);
+    solverTimeout = null;
+  }
+}
+
+// Simple debug step - just move a node visibly
+function debugStep() {
+  if (graph.nodes.length === 0) {
+    showStatus("No graph", true);
+    return;
+  }
+  
+  count = intersections(graph.links);
+  if (count === 0) {
+    showStatus("Already solved", false);
+    return;
+  }
+  
+  // Find any node with intersections
+  var nodeToMove = null;
+  for (var i = 0; i < graph.nodes.length; i++) {
+    if (graph.nodes[i].intersection) {
+      nodeToMove = graph.nodes[i];
+      break;
+    }
+  }
+  
+  if (!nodeToMove) {
+    showStatus("No intersecting node found (count=" + count + ")", true);
+    return;
+  }
+  
+  // Just move it to a random position
+  var oldX = nodeToMove[0];
+  var oldY = nodeToMove[1];
+  showStatus("Moving node from (" + oldX.toFixed(2) + "," + oldY.toFixed(2) + ")", false);
+  
+  animateNode(nodeToMove, Math.random(), Math.random(), function() {
+    moves++;
+    moveCounter.text(moves + " move" + (moves !== 1 ? "s" : ""));
+    showStatus("Moved! Crossings now: " + count, false);
+  });
+}
+
+// Wire up solver buttons
+d3.select("#solver-step").on("click", function() {
+  stopSolver();
+  solverStep(null);
+});
+d3.select("#solver-run").on("click", runSolver);
+d3.select("#solver-stop").on("click", stopSolver);

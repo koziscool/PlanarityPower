@@ -78,347 +78,15 @@
   </div>
   <div class="grid" id="grid"></div>
 
+  <script src="solver.js"></script>
   <script>
-    // ============ CORE GRAPH FUNCTIONS ============
-    
-    function cross(a, b) {
-      return a[0] * b[1] - a[1] * b[0];
-    }
-    
-    function intersect(a, b) {
-      if (a[0] === b[0] && a[1] === b[1] || a[0] === b[1] && a[1] === b[0]) return true;
-      var p = a[0], r = [a[1][0] - p[0], a[1][1] - p[1]];
-      var q = b[0], s = [b[1][0] - q[0], b[1][1] - q[1]];
-      var rxs = cross(r, s);
-      var q_p = [q[0] - p[0], q[1] - p[1]];
-      var t = cross(q_p, s) / rxs;
-      var u = cross(q_p, r) / rxs;
-      var epsilon = 1e-6;
-      return t > epsilon && t < 1 - epsilon && u > epsilon && u < 1 - epsilon;
-    }
-    
-    function intersections(links) {
-      var n = links.length, count = 0;
-      for (var i = 0; i < n; i++) {
-        links[i].intersection = false;
-        links[i][0].intersection = false;
-        links[i][1].intersection = false;
-      }
-      for (var i = 0; i < n; i++) {
-        for (var j = i + 1; j < n; j++) {
-          if (intersect(links[i], links[j])) {
-            links[i].intersection = links[i][0].intersection = links[i][1].intersection = true;
-            links[j].intersection = links[j][0].intersection = links[j][1].intersection = true;
-            count++;
-          }
-        }
-      }
-      return count;
-    }
-    
-    function planarGraph(n) {
-      var points = [], links = [];
-      for (var i = 0; i < n; i++) points[i] = [Math.random(), Math.random()];
-      for (var i = 0; i < n; i++) {
-        var link = [points[i], points[~~(Math.random() * n)]];
-        if (!links.some(function(to) { return intersect(link, to); })) links.push(link);
-      }
-      for (var i = 0; i < n; i++) {
-        for (var j = i + 1; j < n; j++) {
-          var link = [points[i], points[j]];
-          if (!links.some(function(to) { return intersect(link, to); })) links.push(link);
-        }
-      }
-      return { nodes: points, links: links };
-    }
-    
-    function scramble(graph) {
-      if (graph.nodes.length < 4) return graph;
-      do {
-        graph.nodes.forEach(function(node) {
-          node[0] = Math.random();
-          node[1] = Math.random();
-        });
-      } while (!intersections(graph.links));
-      return graph;
-    }
-    
-    function getNeighbors(graph, node) {
-      var neighbors = [];
-      graph.links.forEach(function(link) {
-        if (link[0] === node) neighbors.push(link[1]);
-        else if (link[1] === node) neighbors.push(link[0]);
-      });
-      return neighbors;
-    }
-    
-    // ============ SOLVER STRATEGIES ============
-    
-    function findCentroidMove(graph) {
-      var count = intersections(graph.links);
-      var bestMove = null, bestScore = -Infinity;
-      
-      graph.nodes.forEach(function(node, i) {
-        if (!node.intersection) return;
-        var neighbors = getNeighbors(graph, node);
-        if (neighbors.length === 0) return;
-        
-        var cx = 0, cy = 0;
-        neighbors.forEach(function(n) { cx += n[0]; cy += n[1]; });
-        cx /= neighbors.length; cy /= neighbors.length;
-        
-        var dx = cx - node[0], dy = cy - node[1];
-        var dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 0.01) return;
-        
-        var origX = node[0], origY = node[1];
-        var moveAmt = Math.min(0.1, dist * 0.5);
-        node[0] = origX + (dx / dist) * moveAmt;
-        node[1] = origY + (dy / dist) * moveAmt;
-        node[0] = Math.max(0.02, Math.min(0.98, node[0]));
-        node[1] = Math.max(0.02, Math.min(0.98, node[1]));
-        
-        var newCount = intersections(graph.links);
-        var improvement = count - newCount;
-        var score = improvement * 10 + (1 - dist);
-        
-        if ((improvement > 0 || (improvement === 0 && dist > 0.05)) && score > bestScore) {
-          bestScore = score;
-          bestMove = { node: node, nodeIndex: i, toX: node[0], toY: node[1], fromX: origX, fromY: origY, improvement: improvement, strategy: 'centroid' };
-        }
-        
-        node[0] = origX; node[1] = origY;
-      });
-      
-      intersections(graph.links);
-      return bestMove;
-    }
-    
-    function findLocalMove(graph) {
-      var count = intersections(graph.links);
-      var bestMove = null, bestImprovement = 0;
-      var dirs = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
-      
-      graph.nodes.forEach(function(node, i) {
-        if (!node.intersection) return;
-        var origX = node[0], origY = node[1];
-        
-        dirs.forEach(function(dir) {
-          node[0] = Math.max(0.02, Math.min(0.98, origX + dir[0] * 0.03));
-          node[1] = Math.max(0.02, Math.min(0.98, origY + dir[1] * 0.03));
-          var newCount = intersections(graph.links);
-          var improvement = count - newCount;
-          
-          if (improvement > bestImprovement) {
-            bestImprovement = improvement;
-            bestMove = { node: node, nodeIndex: i, toX: node[0], toY: node[1], fromX: origX, fromY: origY, improvement: improvement, strategy: 'local' };
-          }
-          node[0] = origX; node[1] = origY;
-        });
-      });
-      
-      intersections(graph.links);
-      return bestMove;
-    }
-    
-    function findWiggleMove(graph) {
-      var count = intersections(graph.links);
-      var candidates = graph.nodes.filter(function(n) { return n.intersection; });
-      if (candidates.length === 0) return null;
-      
-      var node = candidates[Math.floor(Math.random() * candidates.length)];
-      var i = graph.nodes.indexOf(node);
-      var origX = node[0], origY = node[1];
-      var bestMove = null, bestImprovement = -Infinity;
-      
-      for (var t = 0; t < 15; t++) {
-        var angle = Math.random() * Math.PI * 2;
-        var dist = 0.05 + Math.random() * 0.1;
-        node[0] = Math.max(0.02, Math.min(0.98, origX + Math.cos(angle) * dist));
-        node[1] = Math.max(0.02, Math.min(0.98, origY + Math.sin(angle) * dist));
-        
-        var newCount = intersections(graph.links);
-        var improvement = count - newCount;
-        
-        if (improvement > bestImprovement) {
-          bestImprovement = improvement;
-          bestMove = { node: node, nodeIndex: i, toX: node[0], toY: node[1], fromX: origX, fromY: origY, improvement: improvement, strategy: 'wiggle' };
-        }
-        node[0] = origX; node[1] = origY;
-      }
-      
-      intersections(graph.links);
-      return bestMove;
-    }
-    
-    // NEW: Spread - push apart nodes that are too close
-    function findSpreadMove(graph) {
-      var count = intersections(graph.links);
-      var bestMove = null, bestImprovement = 0;
-      var minDist = 0.08; // minimum desired distance between nodes
-      
-      graph.nodes.forEach(function(node, i) {
-        if (!node.intersection) return;
-        var origX = node[0], origY = node[1];
-        
-        // Find nearby nodes
-        var pushX = 0, pushY = 0, pushCount = 0;
-        graph.nodes.forEach(function(other, j) {
-          if (i === j) return;
-          var dx = node[0] - other[0];
-          var dy = node[1] - other[1];
-          var dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist < minDist && dist > 0.001) {
-            // Push away from this node
-            var force = (minDist - dist) / minDist;
-            pushX += (dx / dist) * force;
-            pushY += (dy / dist) * force;
-            pushCount++;
-          }
-        });
-        
-        if (pushCount === 0) return;
-        
-        // Normalize and apply
-        var pushMag = Math.sqrt(pushX * pushX + pushY * pushY);
-        if (pushMag < 0.001) return;
-        
-        var moveAmt = Math.min(0.08, pushMag * 0.5);
-        node[0] = Math.max(0.02, Math.min(0.98, origX + (pushX / pushMag) * moveAmt));
-        node[1] = Math.max(0.02, Math.min(0.98, origY + (pushY / pushMag) * moveAmt));
-        
-        var newCount = intersections(graph.links);
-        var improvement = count - newCount;
-        
-        if (improvement > bestImprovement) {
-          bestImprovement = improvement;
-          bestMove = { node: node, nodeIndex: i, toX: node[0], toY: node[1], fromX: origX, fromY: origY, improvement: improvement, strategy: 'spread' };
-        }
-        
-        node[0] = origX; node[1] = origY;
-      });
-      
-      intersections(graph.links);
-      return bestMove;
-    }
-    
-    // NEW: Hot edge targeting - focus on the edge with most crossings
-    function findHotEdgeMove(graph) {
-      var count = intersections(graph.links);
-      if (count === 0) return null;
-      
-      // Count crossings per edge
-      var edgeCrossings = graph.links.map(function(link, i) {
-        var crossCount = 0;
-        graph.links.forEach(function(other, j) {
-          if (i !== j && intersect(link, other)) crossCount++;
-        });
-        return { link: link, index: i, crossings: crossCount };
-      });
-      
-      // Sort by crossings, get worst
-      edgeCrossings.sort(function(a, b) { return b.crossings - a.crossings; });
-      var worst = edgeCrossings[0];
-      if (worst.crossings === 0) return null;
-      
-      // Try moving each endpoint of the worst edge
-      var bestMove = null, bestImprovement = 0;
-      
-      [worst.link[0], worst.link[1]].forEach(function(node) {
-        var i = graph.nodes.indexOf(node);
-        var origX = node[0], origY = node[1];
-        var neighbors = getNeighbors(graph, node);
-        
-        // Try moving toward center and away from the crossing point
-        // Find where the worst edge crosses others
-        var crossPoints = [];
-        graph.links.forEach(function(other) {
-          if (other !== worst.link && intersect(worst.link, other)) {
-            // Approximate crossing point as midpoint between edge midpoints
-            var mid1x = (worst.link[0][0] + worst.link[1][0]) / 2;
-            var mid1y = (worst.link[0][1] + worst.link[1][1]) / 2;
-            var mid2x = (other[0][0] + other[1][0]) / 2;
-            var mid2y = (other[0][1] + other[1][1]) / 2;
-            crossPoints.push([(mid1x + mid2x) / 2, (mid1y + mid2y) / 2]);
-          }
-        });
-        
-        if (crossPoints.length === 0) return;
-        
-        // Move away from average crossing point
-        var avgCrossX = crossPoints.reduce(function(s, p) { return s + p[0]; }, 0) / crossPoints.length;
-        var avgCrossY = crossPoints.reduce(function(s, p) { return s + p[1]; }, 0) / crossPoints.length;
-        
-        var dx = node[0] - avgCrossX;
-        var dy = node[1] - avgCrossY;
-        var dist = Math.sqrt(dx * dx + dy * dy);
-        
-        if (dist < 0.001) return;
-        
-        node[0] = Math.max(0.02, Math.min(0.98, origX + (dx / dist) * 0.06));
-        node[1] = Math.max(0.02, Math.min(0.98, origY + (dy / dist) * 0.06));
-        
-        var newCount = intersections(graph.links);
-        var improvement = count - newCount;
-        
-        if (improvement > bestImprovement) {
-          bestImprovement = improvement;
-          bestMove = { node: node, nodeIndex: i, toX: node[0], toY: node[1], fromX: origX, fromY: origY, improvement: improvement, strategy: 'hotedge' };
-        }
-        
-        node[0] = origX; node[1] = origY;
-      });
-      
-      intersections(graph.links);
-      return bestMove;
-    }
-    
-    // NEW: Rotate around centroid
-    function findRotateMove(graph) {
-      var count = intersections(graph.links);
-      var bestMove = null, bestImprovement = 0;
-      
-      graph.nodes.forEach(function(node, i) {
-        if (!node.intersection) return;
-        var neighbors = getNeighbors(graph, node);
-        if (neighbors.length < 2) return;
-        
-        var origX = node[0], origY = node[1];
-        
-        // Calculate centroid
-        var cx = 0, cy = 0;
-        neighbors.forEach(function(n) { cx += n[0]; cy += n[1]; });
-        cx /= neighbors.length; cy /= neighbors.length;
-        
-        // Current distance and angle from centroid
-        var dx = origX - cx, dy = origY - cy;
-        var dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 0.02) return;
-        
-        var angle = Math.atan2(dy, dx);
-        
-        // Try rotating around centroid
-        var rotations = [0.2, -0.2, 0.4, -0.4, 0.6, -0.6]; // radians
-        rotations.forEach(function(rot) {
-          var newAngle = angle + rot;
-          node[0] = Math.max(0.02, Math.min(0.98, cx + Math.cos(newAngle) * dist));
-          node[1] = Math.max(0.02, Math.min(0.98, cy + Math.sin(newAngle) * dist));
-          
-          var newCount = intersections(graph.links);
-          var improvement = count - newCount;
-          
-          if (improvement > bestImprovement) {
-            bestImprovement = improvement;
-            bestMove = { node: node, nodeIndex: i, toX: node[0], toY: node[1], fromX: origX, fromY: origY, improvement: improvement, strategy: 'rotate' };
-          }
-          
-          node[0] = origX; node[1] = origY;
-        });
-      });
-      
-      intersections(graph.links);
-      return bestMove;
-    }
+    // Import from shared solver
+    var intersections = Solver.intersections;
+    var planarGraph = Solver.planarGraph;
+    var scramble = Solver.scramble;
+    var findBestMove = Solver.findBestMove;
+    var findGridMove = Solver.findGridMove;
+    var findEscapeMove = Solver.findEscapeMove;
     
     // Animate a node move
     function animateMove(puzzle, node, fromX, fromY, toX, toY, callback) {
@@ -464,29 +132,25 @@
         puzzle.metrics = { strategySuccess: {}, stuckRuns: 0, peakCrossings: puzzle.count };
       }
       puzzle.metrics.peakCrossings = Math.max(puzzle.metrics.peakCrossings, puzzle.count);
+      if (!puzzle.solverState) puzzle.solverState = {};
       
-      // Try all strategies
-      var moves = [];
-      var c = findCentroidMove(graph); if (c) moves.push(c);
-      var l = findLocalMove(graph); if (l) moves.push(l);
-      var s = findSpreadMove(graph); if (s) moves.push(s);
-      var h = findHotEdgeMove(graph); if (h) moves.push(h);
-      var r = findRotateMove(graph); if (r) moves.push(r);
-      
+      // Use shared solver - try grid for endgame, then wide random search
       var best = null;
-      moves.forEach(function(m) {
-        if (!best || m.improvement > best.improvement) best = m;
-      });
       
-      if (!best || best.improvement <= 0) {
-        var w = findWiggleMove(graph);
-        if (w && w.improvement > 0) best = w;
+      if (puzzle.count <= 15) {
+        best = findGridMove(graph);
+      }
+      
+      var randomMove = findBestMove(graph, 30);
+      if (!best || (randomMove && randomMove.improvement > best.improvement)) {
+        best = randomMove;
       }
       
       if (best && best.improvement > 0) {
         puzzle.moves++;
         puzzle.lastStrategy = best.strategy;
         puzzle.stuckCount = 0;
+        puzzle.solverState.stuckCount = 0;
         puzzle.metrics.strategySuccess[best.strategy] = (puzzle.metrics.strategySuccess[best.strategy] || 0) + 1;
         
         // Animate the move
@@ -495,19 +159,22 @@
         });
         return;
       } else {
-        puzzle.stuckCount++;
-        if (puzzle.stuckCount > 30) {
+        puzzle.stuckCount = (puzzle.stuckCount || 0) + 1;
+        puzzle.solverState.stuckCount = (puzzle.solverState.stuckCount || 0) + 1;
+        
+        if (puzzle.stuckCount > 50) {
           puzzle.status = 'stuck';
           puzzle.metrics.stuckRuns++;
           if (callback) callback(false);
           return;
         }
-        // Try wiggle anyway
-        var w = findWiggleMove(graph);
-        if (w) {
+        
+        // Try escape
+        var escape = findEscapeMove(graph);
+        if (escape) {
           puzzle.moves++;
           puzzle.lastStrategy = 'escape';
-          animateMove(puzzle, w.node, w.fromX, w.fromY, w.toX, w.toY, function() {
+          animateMove(puzzle, escape.node, escape.fromX, escape.fromY, escape.toX, escape.toY, function() {
             if (callback) callback(true);
           });
           return;

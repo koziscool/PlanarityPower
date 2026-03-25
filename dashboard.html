@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Planarity Solver Dashboard</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 10px;
+      font-family: sans-serif;
+      background: #1a1a1a;
+      color: #fff;
+      overflow: hidden;
+    }
+    .controls {
+      margin-bottom: 10px;
+      padding: 10px;
+      background: #333;
+      border-radius: 5px;
+    }
+    .controls button {
+      padding: 8px 16px;
+      margin-right: 10px;
+      cursor: pointer;
+    }
+    .controls label {
+      margin-right: 20px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      grid-template-rows: repeat(2, 1fr);
+      gap: 10px;
+      height: calc(100vh - 70px);
+    }
+    .puzzle {
+      background: #fff;
+      border-radius: 5px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .puzzle svg {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+    }
+    .puzzle-header {
+      background: #333;
+      color: #fff;
+      padding: 5px 10px;
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .puzzle-header.solved {
+      background: #060;
+    }
+    .puzzle-header.stuck {
+      background: #600;
+    }
+    circle { cursor: default; }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <label>Puzzles: <input type="number" id="num-puzzles" value="6" min="1" max="12" style="width:50px"></label>
+    <label>Nodes: <input type="number" id="num-nodes" value="40" min="10" max="100" style="width:50px"></label>
+    <label>Speed: <input type="range" id="speed" min="1" max="100" value="50" style="width:100px"></label>
+    <button id="start-btn">Start</button>
+    <button id="step-btn">Step All</button>
+    <button id="reset-btn">Reset</button>
+    <span id="status" style="margin-left: 20px;"></span>
+  </div>
+  <div class="grid" id="grid"></div>
+
+  <script>
+    // ============ CORE GRAPH FUNCTIONS ============
+    
+    function cross(a, b) {
+      return a[0] * b[1] - a[1] * b[0];
+    }
+    
+    function intersect(a, b) {
+      if (a[0] === b[0] && a[1] === b[1] || a[0] === b[1] && a[1] === b[0]) return true;
+      var p = a[0], r = [a[1][0] - p[0], a[1][1] - p[1]];
+      var q = b[0], s = [b[1][0] - q[0], b[1][1] - q[1]];
+      var rxs = cross(r, s);
+      var q_p = [q[0] - p[0], q[1] - p[1]];
+      var t = cross(q_p, s) / rxs;
+      var u = cross(q_p, r) / rxs;
+      var epsilon = 1e-6;
+      return t > epsilon && t < 1 - epsilon && u > epsilon && u < 1 - epsilon;
+    }
+    
+    function intersections(links) {
+      var n = links.length, count = 0;
+      for (var i = 0; i < n; i++) {
+        links[i].intersection = false;
+        links[i][0].intersection = false;
+        links[i][1].intersection = false;
+      }
+      for (var i = 0; i < n; i++) {
+        for (var j = i + 1; j < n; j++) {
+          if (intersect(links[i], links[j])) {
+            links[i].intersection = links[i][0].intersection = links[i][1].intersection = true;
+            links[j].intersection = links[j][0].intersection = links[j][1].intersection = true;
+            count++;
+          }
+        }
+      }
+      return count;
+    }
+    
+    function planarGraph(n) {
+      var points = [], links = [];
+      for (var i = 0; i < n; i++) points[i] = [Math.random(), Math.random()];
+      for (var i = 0; i < n; i++) {
+        var link = [points[i], points[~~(Math.random() * n)]];
+        if (!links.some(function(to) { return intersect(link, to); })) links.push(link);
+      }
+      for (var i = 0; i < n; i++) {
+        for (var j = i + 1; j < n; j++) {
+          var link = [points[i], points[j]];
+          if (!links.some(function(to) { return intersect(link, to); })) links.push(link);
+        }
+      }
+      return { nodes: points, links: links };
+    }
+    
+    function scramble(graph) {
+      if (graph.nodes.length < 4) return graph;
+      do {
+        graph.nodes.forEach(function(node) {
+          node[0] = Math.random();
+          node[1] = Math.random();
+        });
+      } while (!intersections(graph.links));
+      return graph;
+    }
+    
+    function getNeighbors(graph, node) {
+      var neighbors = [];
+      graph.links.forEach(function(link) {
+        if (link[0] === node) neighbors.push(link[1]);
+        else if (link[1] === node) neighbors.push(link[0]);
+      });
+      return neighbors;
+    }
+    
+    // ============ SOLVER STRATEGIES ============
+    
+    function findCentroidMove(graph) {
+      var count = intersections(graph.links);
+      var bestMove = null, bestScore = -Infinity;
+      
+      graph.nodes.forEach(function(node, i) {
+        if (!node.intersection) return;
+        var neighbors = getNeighbors(graph, node);
+        if (neighbors.length === 0) return;
+        
+        var cx = 0, cy = 0;
+        neighbors.forEach(function(n) { cx += n[0]; cy += n[1]; });
+        cx /= neighbors.length; cy /= neighbors.length;
+        
+        var dx = cx - node[0], dy = cy - node[1];
+        var dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 0.01) return;
+        
+        var origX = node[0], origY = node[1];
+        var moveAmt = Math.min(0.1, dist * 0.5);
+        node[0] = origX + (dx / dist) * moveAmt;
+        node[1] = origY + (dy / dist) * moveAmt;
+        node[0] = Math.max(0.02, Math.min(0.98, node[0]));
+        node[1] = Math.max(0.02, Math.min(0.98, node[1]));
+        
+        var newCount = intersections(graph.links);
+        var improvement = count - newCount;
+        var score = improvement * 10 + (1 - dist);
+        
+        if ((improvement > 0 || (improvement === 0 && dist > 0.05)) && score > bestScore) {
+          bestScore = score;
+          bestMove = { node: node, nodeIndex: i, toX: node[0], toY: node[1], fromX: origX, fromY: origY, improvement: improvement, strategy: 'centroid' };
+        }
+        
+        node[0] = origX; node[1] = origY;
+      });
+      
+      intersections(graph.links);
+      return bestMove;
+    }
+    
+    function findLocalMove(graph) {
+      var count = intersections(graph.links);
+      var bestMove = null, bestImprovement = 0;
+      var dirs = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+      
+      graph.nodes.forEach(function(node, i) {
+        if (!node.intersection) return;
+        var origX = node[0], origY = node[1];
+        
+        dirs.forEach(function(dir) {
+          node[0] = Math.max(0.02, Math.min(0.98, origX + dir[0] * 0.03));
+          node[1] = Math.max(0.02, Math.min(0.98, origY + dir[1] * 0.03));
+          var newCount = intersections(graph.links);
+          var improvement = count - newCount;
+          
+          if (improvement > bestImprovement) {
+            bestImprovement = improvement;
+            bestMove = { node: node, nodeIndex: i, toX: node[0], toY: node[1], fromX: origX, fromY: origY, improvement: improvement, strategy: 'local' };
+          }
+          node[0] = origX; node[1] = origY;
+        });
+      });
+      
+      intersections(graph.links);
+      return bestMove;
+    }
+    
+    function findWiggleMove(graph) {
+      var count = intersections(graph.links);
+      var candidates = graph.nodes.filter(function(n) { return n.intersection; });
+      if (candidates.length === 0) return null;
+      
+      var node = candidates[Math.floor(Math.random() * candidates.length)];
+      var i = graph.nodes.indexOf(node);
+      var origX = node[0], origY = node[1];
+      var bestMove = null, bestImprovement = -Infinity;
+      
+      for (var t = 0; t < 15; t++) {
+        var angle = Math.random() * Math.PI * 2;
+        var dist = 0.05 + Math.random() * 0.1;
+        node[0] = Math.max(0.02, Math.min(0.98, origX + Math.cos(angle) * dist));
+        node[1] = Math.max(0.02, Math.min(0.98, origY + Math.sin(angle) * dist));
+        
+        var newCount = intersections(graph.links);
+        var improvement = count - newCount;
+        
+        if (improvement > bestImprovement) {
+          bestImprovement = improvement;
+          bestMove = { node: node, nodeIndex: i, toX: node[0], toY: node[1], fromX: origX, fromY: origY, improvement: improvement, strategy: 'wiggle' };
+        }
+        node[0] = origX; node[1] = origY;
+      }
+      
+      intersections(graph.links);
+      return bestMove;
+    }
+    
+    function solverStep(puzzle) {
+      var graph = puzzle.graph;
+      puzzle.count = intersections(graph.links);
+      
+      if (puzzle.count === 0) {
+        puzzle.status = 'solved';
+        return false;
+      }
+      
+      var moves = [];
+      var c = findCentroidMove(graph); if (c) moves.push(c);
+      var l = findLocalMove(graph); if (l) moves.push(l);
+      
+      var best = null;
+      moves.forEach(function(m) {
+        if (!best || m.improvement > best.improvement) best = m;
+      });
+      
+      if (!best || best.improvement <= 0) {
+        var w = findWiggleMove(graph);
+        if (w && w.improvement > 0) best = w;
+      }
+      
+      if (best && best.improvement > 0) {
+        best.node[0] = best.toX;
+        best.node[1] = best.toY;
+        puzzle.moves++;
+        puzzle.lastStrategy = best.strategy;
+        puzzle.stuckCount = 0;
+        return true;
+      } else {
+        puzzle.stuckCount++;
+        if (puzzle.stuckCount > 20) {
+          puzzle.status = 'stuck';
+          return false;
+        }
+        // Try wiggle anyway
+        var w = findWiggleMove(graph);
+        if (w) {
+          w.node[0] = w.toX;
+          w.node[1] = w.toY;
+          puzzle.moves++;
+          puzzle.lastStrategy = 'wiggle-escape';
+        }
+        return true;
+      }
+    }
+    
+    // ============ RENDERING ============
+    
+    function renderPuzzle(puzzle) {
+      var svg = puzzle.svg;
+      var w = puzzle.width, h = puzzle.height;
+      var graph = puzzle.graph;
+      puzzle.count = intersections(graph.links);
+      
+      var scaleX = function(v) { return 10 + v * (w - 20); };
+      var scaleY = function(v) { return 10 + v * (h - 20); };
+      
+      // Clear
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      
+      // Edges
+      graph.links.forEach(function(link) {
+        var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', scaleX(link[0][0]));
+        line.setAttribute('y1', scaleY(link[0][1]));
+        line.setAttribute('x2', scaleX(link[1][0]));
+        line.setAttribute('y2', scaleY(link[1][1]));
+        line.setAttribute('stroke', link.intersection ? '#000' : '#fc0');
+        line.setAttribute('stroke-width', '1.5');
+        svg.appendChild(line);
+      });
+      
+      // Nodes
+      graph.nodes.forEach(function(node, i) {
+        var circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', scaleX(node[0]));
+        circle.setAttribute('cy', scaleY(node[1]));
+        circle.setAttribute('r', '5');
+        circle.setAttribute('fill', node.intersection ? '#0cf' : '#fc0');
+        circle.setAttribute('stroke', '#000');
+        circle.setAttribute('stroke-width', '1');
+        svg.appendChild(circle);
+      });
+      
+      // Update header
+      var header = puzzle.header;
+      header.className = 'puzzle-header' + (puzzle.status === 'solved' ? ' solved' : (puzzle.status === 'stuck' ? ' stuck' : ''));
+      header.innerHTML = '<span>P' + puzzle.id + ' | ' + puzzle.count + ' crossings | ' + puzzle.moves + ' moves</span><span>' + (puzzle.lastStrategy || '-') + '</span>';
+    }
+    
+    // ============ MAIN ============
+    
+    var puzzles = [];
+    var running = false;
+    var intervalId = null;
+    
+    function createPuzzles() {
+      var numPuzzles = parseInt(document.getElementById('num-puzzles').value) || 6;
+      var numNodes = parseInt(document.getElementById('num-nodes').value) || 30;
+      var grid = document.getElementById('grid');
+      grid.innerHTML = '';
+      puzzles = [];
+      
+      for (var i = 0; i < numPuzzles; i++) {
+        var div = document.createElement('div');
+        div.className = 'puzzle';
+        
+        var header = document.createElement('div');
+        header.className = 'puzzle-header';
+        header.textContent = 'Puzzle ' + i;
+        div.appendChild(header);
+        
+        var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', '0 0 400 300');
+        svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        div.appendChild(svg);
+        
+        grid.appendChild(div);
+        
+        var graph = scramble(planarGraph(numNodes));
+        var puzzle = {
+          id: i,
+          graph: graph,
+          svg: svg,
+          header: header,
+          width: 400,
+          height: 300,
+          count: 0,
+          moves: 0,
+          status: 'running',
+          lastStrategy: null,
+          stuckCount: 0
+        };
+        puzzles.push(puzzle);
+        renderPuzzle(puzzle);
+      }
+      
+      updateStatus();
+    }
+    
+    function stepAll() {
+      var anyActive = false;
+      puzzles.forEach(function(puzzle) {
+        if (puzzle.status === 'running') {
+          var continued = solverStep(puzzle);
+          renderPuzzle(puzzle);
+          if (continued && puzzle.status === 'running') anyActive = true;
+        }
+      });
+      updateStatus();
+      return anyActive;
+    }
+    
+    function updateStatus() {
+      var solved = puzzles.filter(function(p) { return p.status === 'solved'; }).length;
+      var stuck = puzzles.filter(function(p) { return p.status === 'stuck'; }).length;
+      var totalMoves = puzzles.reduce(function(s, p) { return s + p.moves; }, 0);
+      document.getElementById('status').textContent = 
+        'Solved: ' + solved + '/' + puzzles.length + ' | Stuck: ' + stuck + ' | Total moves: ' + totalMoves;
+    }
+    
+    function start() {
+      if (running) {
+        running = false;
+        clearInterval(intervalId);
+        document.getElementById('start-btn').textContent = 'Start';
+        return;
+      }
+      
+      running = true;
+      document.getElementById('start-btn').textContent = 'Pause';
+      
+      function tick() {
+        var speed = parseInt(document.getElementById('speed').value);
+        var delay = Math.max(10, 300 - speed * 3);
+        
+        var anyActive = stepAll();
+        if (anyActive && running) {
+          intervalId = setTimeout(tick, delay);
+        } else {
+          running = false;
+          document.getElementById('start-btn').textContent = 'Start';
+        }
+      }
+      tick();
+    }
+    
+    document.getElementById('start-btn').addEventListener('click', start);
+    document.getElementById('step-btn').addEventListener('click', stepAll);
+    document.getElementById('reset-btn').addEventListener('click', createPuzzles);
+    
+    // Initialize
+    createPuzzles();
+  </script>
+</body>
+</html>

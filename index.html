@@ -36,12 +36,23 @@
             <button id="delete-save" class="last">Delete</button>
           </div>
         </div>
-        <div style="display: flex; gap: 5px; margin-top: 10px; align-items: center;">
-          <span>Solver:</span>
-          <button id="solver-step" class="first">Step</button>
-          <button id="solver-run">Run</button>
-          <button id="solver-stop" class="last">Stop</button>
-          <label style="margin-left: 10px;">Speed: <input type="range" id="solver-speed" min="1" max="100" value="50" style="width: 80px;"></label>
+        <div style="margin-top: 10px;">
+          <div style="display: flex; gap: 5px; align-items: center; flex-wrap: wrap;">
+            <span>Moves:</span>
+            <button id="move-centroid" class="first">Centroid</button>
+            <button id="move-uncross">Uncross</button>
+            <button id="move-local">Local</button>
+            <button id="move-wiggle">Wiggle</button>
+            <button id="move-repel" class="last">Repel</button>
+          </div>
+          <div style="display: flex; gap: 5px; margin-top: 5px; align-items: center;">
+            <span>Auto:</span>
+            <button id="solver-run" class="first">Run</button>
+            <button id="solver-stop">Stop</button>
+            <button id="dump-state">Dump</button>
+            <button id="run-benchmark" class="last">Bench</button>
+            <label style="margin-left: 10px;">Speed: <input type="range" id="solver-speed" min="1" max="100" value="50" style="width: 80px;"></label>
+          </div>
         </div>
         <p><label for="intersections"><input type="checkbox" id="intersections" checked> Highlight non-intersecting lines</label>.
       </div>

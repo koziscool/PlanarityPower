@@ -1,4 +1,5 @@
 circle { fill: #fc0; cursor: move; stroke: #000; stroke-width: 1.1px; }
 circle.intersection { fill: #0cf; }
+circle.selected { fill: #f06; stroke: #900; stroke-width: 2px; }
 line { stroke: #fc0; stroke-width: 1.1px; }
 line.intersection { stroke: #000; }

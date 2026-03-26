@@ -1,0 +1,1110 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Planarity Interactive Training</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 10px;
+      font-family: sans-serif;
+      background: #1a1a1a;
+      color: #fff;
+      overflow: hidden;
+    }
+    .controls {
+      margin-bottom: 10px;
+      padding: 10px;
+      background: #333;
+      border-radius: 5px;
+    }
+    .controls button {
+      padding: 8px 16px;
+      margin-right: 10px;
+      cursor: pointer;
+    }
+    .controls button.active {
+      background: #4a4;
+      color: white;
+    }
+    .controls label {
+      margin-right: 20px;
+    }
+    .strategy-buttons {
+      display: inline-block;
+      margin-left: 20px;
+      padding: 4px 8px;
+      background: #444;
+      border-radius: 4px;
+    }
+    .strategy-buttons button {
+      padding: 4px 10px;
+      margin-right: 4px;
+      font-size: 12px;
+    }
+    .strategy-buttons button.highlight {
+      background: #f80;
+      color: white;
+    }
+    .history-buttons {
+      display: inline-block;
+      margin-left: 20px;
+    }
+    .history-buttons button {
+      padding: 4px 10px;
+      font-size: 12px;
+    }
+    .main-container {
+      display: flex;
+      gap: 15px;
+      height: calc(100vh - 70px);
+    }
+    .puzzle {
+      flex: 1;
+      background: #fff;
+      border-radius: 5px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .puzzle svg {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+    }
+    .puzzle-header {
+      background: #333;
+      color: #fff;
+      padding: 5px 10px;
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .puzzle-header.solved {
+      background: #060;
+    }
+    .puzzle-header.stuck {
+      background: #600;
+    }
+    .side-panel {
+      width: 140px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .side-panel button {
+      padding: 12px 8px;
+      font-size: 14px;
+      cursor: pointer;
+      border: 1px solid #555;
+      border-radius: 4px;
+      background: #444;
+      color: #fff;
+    }
+    .side-panel button:hover {
+      background: #555;
+    }
+    .side-panel button.highlight {
+      background: #f80;
+      border-color: #f80;
+    }
+    .side-panel .section-label {
+      font-size: 11px;
+      color: #888;
+      margin-top: 10px;
+      text-transform: uppercase;
+    }
+    .side-panel .history-row {
+      display: flex;
+      gap: 4px;
+    }
+    .side-panel .history-row button {
+      flex: 1;
+      padding: 8px 4px;
+    }
+    circle { cursor: default; }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <label>Nodes: <input type="number" id="num-nodes" value="40" min="10" max="100" style="width:50px"></label>
+    <button id="reset-btn">New Graph</button>
+    <span id="status" style="margin-left: 20px;"></span>
+  </div>
+  
+  <div class="main-container">
+    <div class="puzzle" id="puzzle-container"></div>
+    
+    <div class="side-panel">
+      <div class="section-label">Move</div>
+      <button id="btn-minimize">Minimize Crossings</button>
+      <button id="btn-grow">Grow Clump</button>
+      <button id="btn-shift">Shift Clump</button>
+      <button id="btn-grid">Grid Search</button>
+      <button id="btn-escape">Escape</button>
+      
+      <div class="section-label">Control</div>
+      <button id="btn-step">Step</button>
+      <button id="btn-run">Run</button>
+      
+      <div class="section-label">History</div>
+      <div class="history-row">
+        <button id="btn-back">&larr;</button>
+        <button id="btn-forward">&rarr;</button>
+      </div>
+      
+      <div class="section-label">Speed</div>
+      <input type="range" id="speed" min="1" max="100" value="50" style="width:100%">
+    </div>
+  </div>
+  
+  <input type="hidden" id="num-puzzles" value="1">
+
+  <script src="solver.js"></script>
+  <script>
+    console.log('Dashboard script starting...');
+    
+    // In Electron, Solver might need to be loaded via require
+    var Solver = window.Solver;
+    if (typeof require !== 'undefined' && !Solver) {
+      try {
+        Solver = require('./solver.js');
+        console.log('Loaded Solver via require');
+      } catch(e) {
+        console.error('Could not require solver.js:', e);
+      }
+    }
+    console.log('Solver object:', typeof Solver, Solver ? Object.keys(Solver) : 'undefined');
+    
+    // Import from shared solver
+    var intersections = Solver.intersections;
+    var planarGraph = Solver.planarGraph;
+    var scramble = Solver.scramble;
+    var getNeighbors = Solver.getNeighbors;
+    var findBestMove = Solver.findBestMove;
+    var findGridMove = Solver.findGridMove;
+    var findEscapeMove = Solver.findEscapeMove;
+    var findGrowClumpMove = Solver.findGrowClumpMove;
+    var findMoveClumpMove = Solver.findMoveClumpMove;
+    var findClumps = Solver.findClumps;
+    
+    // ============ HISTORY MANAGEMENT ============
+    
+    function saveState(puzzle) {
+      // Save current vertex positions
+      var positions = puzzle.graph.nodes.map(function(n) { return [n[0], n[1]]; });
+      
+      // If we're in the middle of history, truncate forward history
+      if (puzzle.historyIndex < puzzle.history.length - 1) {
+        puzzle.history = puzzle.history.slice(0, puzzle.historyIndex + 1);
+      }
+      
+      puzzle.history.push({
+        positions: positions,
+        crossings: puzzle.count,
+        strategy: puzzle.lastStrategy,
+        movingNode: puzzle.movingNodeIndex
+      });
+      puzzle.historyIndex = puzzle.history.length - 1;
+    }
+    
+    function restoreState(puzzle, index) {
+      if (index < 0 || index >= puzzle.history.length) return false;
+      
+      var state = puzzle.history[index];
+      puzzle.graph.nodes.forEach(function(node, i) {
+        node[0] = state.positions[i][0];
+        node[1] = state.positions[i][1];
+      });
+      puzzle.historyIndex = index;
+      puzzle.count = intersections(puzzle.graph.links);
+      puzzle.lastStrategy = state.strategy || '-';
+      puzzle.movingNodeIndex = state.movingNode;
+      renderPuzzle(puzzle);
+      return true;
+    }
+    
+    function goBack(puzzle) {
+      if (puzzle.historyIndex > 0) {
+        restoreState(puzzle, puzzle.historyIndex - 1);
+        updateStatus();
+      }
+    }
+    
+    function goForward(puzzle) {
+      if (puzzle.historyIndex < puzzle.history.length - 1) {
+        restoreState(puzzle, puzzle.historyIndex + 1);
+        updateStatus();
+      }
+    }
+    
+    // ============ HIGHLIGHT STRATEGY ============
+    
+    function highlightStrategy(strategy) {
+      // Clear all highlights
+      document.querySelectorAll('.side-panel button').forEach(function(btn) {
+        btn.classList.remove('highlight');
+      });
+      
+      // Highlight the used strategy
+      var btnId = {
+        'random': 'btn-minimize',
+        'centroid': 'btn-minimize',
+        'grow': 'btn-grow',
+        'shift': 'btn-shift',
+        'grid': 'btn-grid',
+        'escape': 'btn-escape'
+      }[strategy];
+      
+      if (btnId) {
+        document.getElementById(btnId).classList.add('highlight');
+      }
+    }
+    
+    // ============ ANIMATE MOVE ============
+    
+    function animateMove(puzzle, node, fromX, fromY, toX, toY, callback) {
+      var duration = 200; // ms
+      var startTime = Date.now();
+      var nodeIndex = puzzle.graph.nodes.indexOf(node);
+      puzzle.movingNodeIndex = nodeIndex;
+      
+      function frame() {
+        var elapsed = Date.now() - startTime;
+        var t = Math.min(1, elapsed / duration);
+        t = t * (2 - t); // ease out
+        
+        node[0] = fromX + (toX - fromX) * t;
+        node[1] = fromY + (toY - fromY) * t;
+        
+        intersections(puzzle.graph.links);
+        renderPuzzle(puzzle);
+        
+        if (t < 1) {
+          requestAnimationFrame(frame);
+        } else {
+          node[0] = toX;
+          node[1] = toY;
+          puzzle.movingNodeIndex = -1;
+          if (callback) callback();
+        }
+      }
+      
+      requestAnimationFrame(frame);
+    }
+    
+    // ============ EXECUTE SPECIFIC STRATEGY ============
+    
+    function executeStrategy(puzzle, strategyName, callback) {
+      var graph = puzzle.graph;
+      puzzle.count = intersections(graph.links);
+      
+      if (puzzle.count === 0) {
+        puzzle.status = 'solved';
+        if (callback) callback(false);
+        return;
+      }
+      
+      var move = null;
+      
+      if (strategyName === 'minimize') {
+        // Try all nodes × 31 positions, pick best
+        move = findBestMove(graph, 30);
+      } else if (strategyName === 'grow') {
+        move = findGrowClumpMove(graph);
+      } else if (strategyName === 'shift') {
+        // Shift clump returns a different structure, handle specially
+        var shiftMove = findMoveClumpMove(graph);
+        if (shiftMove && shiftMove.improvement > 0) {
+          // Save state before move
+          saveState(puzzle);
+          
+          // Apply the shift
+          shiftMove.clump.forEach(function(node) {
+            node[0] += shiftMove.dx;
+            node[1] += shiftMove.dy;
+          });
+          
+          puzzle.moves++;
+          puzzle.lastStrategy = 'shift';
+          highlightStrategy('shift');
+          intersections(graph.links);
+          renderPuzzle(puzzle);
+          saveState(puzzle);
+          updateStatus();
+          if (callback) callback(true);
+          return;
+        }
+        if (callback) callback(false);
+        return;
+      } else if (strategyName === 'grid') {
+        move = findGridMove(graph);
+      } else if (strategyName === 'escape') {
+        move = findEscapeMove(graph);
+      } else if (strategyName === 'auto') {
+        // Auto: try grow first, then minimize, then grid, then escape
+        move = findGrowClumpMove(graph);
+        if (!move || move.improvement <= 0) {
+          move = findBestMove(graph, 30);
+        }
+        if ((!move || move.improvement <= 0) && puzzle.count <= 15) {
+          var gridMove = findGridMove(graph);
+          if (gridMove && gridMove.improvement > 0) {
+            move = gridMove;
+          }
+        }
+      }
+      
+      if (move) {
+        // Save state before move
+        saveState(puzzle);
+        
+        puzzle.moves++;
+        puzzle.lastStrategy = move.strategy;
+        highlightStrategy(move.strategy);
+        
+        animateMove(puzzle, move.node, move.fromX, move.fromY, move.toX, move.toY, function() {
+          // Save state after move
+          saveState(puzzle);
+          updateStatus();
+          if (callback) callback(move.improvement > 0);
+        });
+      } else {
+        if (callback) callback(false);
+      }
+    }
+    
+    function solverStep(puzzle, callback) {
+      executeStrategy(puzzle, 'auto', callback);
+    }
+    
+    // ============ RENDERING ============
+    
+    function renderPuzzle(puzzle) {
+      var svg = puzzle.svg;
+      var w = puzzle.width, h = puzzle.height;
+      var graph = puzzle.graph;
+      puzzle.count = intersections(graph.links);
+      
+      var scaleX = function(v) { return 10 + v * (w - 20); };
+      var scaleY = function(v) { return 10 + v * (h - 20); };
+      
+      // Clear
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      
+      // Edges
+      graph.links.forEach(function(link) {
+        var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', scaleX(link[0][0]));
+        line.setAttribute('y1', scaleY(link[0][1]));
+        line.setAttribute('x2', scaleX(link[1][0]));
+        line.setAttribute('y2', scaleY(link[1][1]));
+        line.setAttribute('stroke', link.intersection ? '#000' : '#fc0');
+        line.setAttribute('stroke-width', '0.6');
+        svg.appendChild(line);
+      });
+      
+      // Nodes
+      graph.nodes.forEach(function(node, i) {
+        var circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', scaleX(node[0]));
+        circle.setAttribute('cy', scaleY(node[1]));
+        
+        // Determine state: moving, selected, or normal
+        var isMoving = (i === puzzle.movingNodeIndex);
+        var isSelected = (i === selectedNodeIndex);
+        
+        if (isMoving) {
+          circle.setAttribute('r', '4');
+          circle.setAttribute('fill', '#f00');
+          circle.setAttribute('stroke', '#900');
+          circle.setAttribute('stroke-width', '1.5');
+        } else if (isSelected) {
+          circle.setAttribute('r', '4');
+          circle.setAttribute('fill', node.intersection ? '#f0f' : '#0f0');
+          circle.setAttribute('stroke', '#fff');
+          circle.setAttribute('stroke-width', '1.5');
+        } else {
+          circle.setAttribute('r', '2.5');
+          circle.setAttribute('fill', node.intersection ? '#0cf' : '#fc0');
+          circle.setAttribute('stroke', '#000');
+          circle.setAttribute('stroke-width', '0.3');
+        }
+        circle.style.cursor = 'pointer';
+        
+        // Add handlers
+        (function(n, idx) {
+          // Left click = drag
+          circle.addEventListener('mousedown', function(e) {
+            if (e.button === 0) {
+              e.preventDefault();
+              startDrag(puzzle, n, idx, e);
+            }
+          });
+          // Right click = select
+          circle.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            selectNode(puzzle, idx);
+          });
+        })(node, i);
+        
+        svg.appendChild(circle);
+      });
+      
+      // Update header
+      var header = puzzle.header;
+      header.className = 'puzzle-header' + (puzzle.status === 'solved' ? ' solved' : (puzzle.status === 'stuck' ? ' stuck' : ''));
+      header.innerHTML = '<span>P' + puzzle.id + ' | ' + puzzle.count + ' crossings | ' + puzzle.moves + ' moves</span><span>' + (puzzle.lastStrategy || '-') + '</span>';
+    }
+    
+    // ============ SELECTION AND STATE ============
+    
+    var selectedNodeIndex = -1;
+    
+    function selectNode(puzzle, nodeIndex) {
+      selectedNodeIndex = nodeIndex;
+      renderPuzzle(puzzle);
+      try { saveStateToFile(puzzle); } catch(e) { console.error('saveStateToFile error:', e); }
+    }
+    
+    function saveStateToFile(puzzle) {
+      if (!puzzle) return;
+      
+      var graph = puzzle.graph;
+      intersections(graph.links);
+      var clumps = findClumps(graph);
+      
+      var state = {
+        timestamp: new Date().toISOString(),
+        moves: puzzle.moves,
+        crossings: puzzle.count,
+        totalVertices: graph.nodes.length,
+        conflictFree: graph.nodes.filter(function(n) { return !n.intersection; }).length,
+        clumps: clumps.length,
+        largestClump: clumps.length > 0 ? clumps[0].length : 0,
+        selectedVertex: selectedNodeIndex,
+        selectedInfo: null,
+        vertices: graph.nodes.map(function(n, i) {
+          var neighbors = getNeighbors(graph, n);
+          // Count crossings involving this vertex's edges
+          var crossingCount = 0;
+          graph.links.forEach(function(link) {
+            if ((link[0] === n || link[1] === n) && link.intersection) {
+              // Count how many other edges this edge crosses
+              graph.links.forEach(function(other) {
+                if (other !== link && Solver.intersect(link, other)) {
+                  crossingCount++;
+                }
+              });
+            }
+          });
+          return {
+            index: i,
+            x: n[0],
+            y: n[1],
+            hasConflict: n.intersection,
+            neighborCount: neighbors.length,
+            crossingCount: crossingCount,
+            neighborIndices: neighbors.map(function(nb) { return graph.nodes.indexOf(nb); })
+          };
+        })
+      };
+      
+      // Add selected vertex details
+      if (selectedNodeIndex >= 0 && selectedNodeIndex < graph.nodes.length) {
+        var selNode = graph.nodes[selectedNodeIndex];
+        var neighbors = getNeighbors(graph, selNode);
+        
+        // Calculate anchor score (how spread out are neighbors?) and gap direction
+        var anchorScore = 0;
+        var gapDirection = null; // angle pointing toward the largest gap (where vertex can move)
+        var gapSize = 0;
+        if (neighbors.length >= 2) {
+          var angles = neighbors.map(function(nb) {
+            return Math.atan2(nb[1] - selNode[1], nb[0] - selNode[0]);
+          });
+          angles.sort(function(a, b) { return a - b; });
+          var maxGap = 0;
+          var maxGapStart = 0;
+          for (var i = 0; i < angles.length; i++) {
+            var gap = angles[(i + 1) % angles.length] - angles[i];
+            if (i === angles.length - 1) gap += Math.PI * 2;
+            if (gap > maxGap) {
+              maxGap = gap;
+              maxGapStart = angles[i];
+            }
+          }
+          // Anchor score: 1 = well anchored (neighbors spread), 0 = poorly anchored (neighbors clustered)
+          anchorScore = 1 - (maxGap / (Math.PI * 2));
+          gapSize = maxGap;
+          // Direction pointing to center of the gap (where vertex can move freely)
+          gapDirection = maxGapStart + maxGap / 2;
+          // Normalize to -PI to PI
+          while (gapDirection > Math.PI) gapDirection -= Math.PI * 2;
+          while (gapDirection < -Math.PI) gapDirection += Math.PI * 2;
+        }
+        
+        // Count crossings for selected vertex
+        var selCrossingCount = 0;
+        graph.links.forEach(function(link) {
+          if ((link[0] === selNode || link[1] === selNode) && link.intersection) {
+            graph.links.forEach(function(other) {
+              if (other !== link && Solver.intersect(link, other)) {
+                selCrossingCount++;
+              }
+            });
+          }
+        });
+        
+        // Convert gap direction to human-readable
+        var gapDirectionLabel = null;
+        if (gapDirection !== null) {
+          var deg = gapDirection * 180 / Math.PI;
+          if (deg > -22.5 && deg <= 22.5) gapDirectionLabel = 'right';
+          else if (deg > 22.5 && deg <= 67.5) gapDirectionLabel = 'down-right';
+          else if (deg > 67.5 && deg <= 112.5) gapDirectionLabel = 'down';
+          else if (deg > 112.5 && deg <= 157.5) gapDirectionLabel = 'down-left';
+          else if (deg > 157.5 || deg <= -157.5) gapDirectionLabel = 'left';
+          else if (deg > -157.5 && deg <= -112.5) gapDirectionLabel = 'up-left';
+          else if (deg > -112.5 && deg <= -67.5) gapDirectionLabel = 'up';
+          else if (deg > -67.5 && deg <= -22.5) gapDirectionLabel = 'up-right';
+        }
+        
+        state.selectedInfo = {
+          index: selectedNodeIndex,
+          x: selNode[0].toFixed(3),
+          y: selNode[1].toFixed(3),
+          hasConflict: selNode.intersection,
+          neighborCount: neighbors.length,
+          crossingCount: selCrossingCount,
+          anchorScore: anchorScore.toFixed(2),
+          gapSizeDeg: gapSize ? (gapSize * 180 / Math.PI).toFixed(0) : null,
+          gapDirection: gapDirectionLabel
+        };
+      }
+      
+      // Write to file (works in Electron with nodeIntegration)
+      if (typeof require !== 'undefined') {
+        try {
+          var fs = require('fs');
+          var path = require('path');
+          var filePath = path.join(__dirname || '.', 'dashboard-state.json');
+          fs.writeFileSync(filePath, JSON.stringify(state, null, 2));
+          console.log('State saved to', filePath);
+        } catch(e) {
+          console.log('Could not save state file:', e.message);
+          console.log('State:', state);
+        }
+      } else {
+        console.log('State:', state);
+      }
+    }
+    
+    // ============ MOVE HISTORY LOGGING ============
+    
+    function logMoveHistory(moveNum, vertexIdx, fromX, fromY, toX, toY, crossingsBefore, crossingsAfter, source) {
+      if (typeof require === 'undefined') return;
+      
+      try {
+        var fs = require('fs');
+        var path = require('path');
+        var filePath = path.join(__dirname || '.', 'move-history.jsonl');
+        
+        var entry = {
+          timestamp: new Date().toISOString(),
+          move: moveNum,
+          vertex: vertexIdx,
+          from: [parseFloat(fromX.toFixed(4)), parseFloat(fromY.toFixed(4))],
+          to: [parseFloat(toX.toFixed(4)), parseFloat(toY.toFixed(4))],
+          crossings_before: crossingsBefore,
+          crossings_after: crossingsAfter,
+          change: crossingsAfter - crossingsBefore,
+          source: source
+        };
+        
+        fs.appendFileSync(filePath, JSON.stringify(entry) + '\n');
+        console.log('Move logged:', entry);
+      } catch(e) {
+        console.log('Could not log move:', e.message);
+      }
+    }
+    
+    // ============ DRAG AND DROP ============
+    
+    var dragState = {
+      active: false,
+      node: null,
+      nodeIndex: -1,
+      startX: 0,
+      startY: 0,
+      offsetX: 0,
+      offsetY: 0,
+      puzzle: null
+    };
+    
+    function startDrag(puzzle, node, nodeIndex, event) {
+      if (running) return; // Don't drag while auto-running
+      
+      var svg = puzzle.svg;
+      var rect = svg.getBoundingClientRect();
+      
+      // Calculate where the mouse clicked in normalized coords
+      var mouseX = event.clientX - rect.left;
+      var mouseY = event.clientY - rect.top;
+      var viewBox = svg.viewBox.baseVal;
+      var scaleX = viewBox.width / rect.width;
+      var scaleY = viewBox.height / rect.height;
+      var svgX = mouseX * scaleX;
+      var svgY = mouseY * scaleY;
+      var w = puzzle.width, h = puzzle.height;
+      var clickNormX = (svgX - 10) / (w - 20);
+      var clickNormY = (svgY - 10) / (h - 20);
+      
+      // Store offset between click position and node position (prevents jump)
+      dragState.offsetX = node[0] - clickNormX;
+      dragState.offsetY = node[1] - clickNormY;
+      
+      dragState.active = true;
+      dragState.node = node;
+      dragState.nodeIndex = nodeIndex;
+      dragState.startX = node[0];
+      dragState.startY = node[1];
+      dragState.puzzle = puzzle;
+      
+      // Save state at start of drag
+      saveState(puzzle);
+      
+      puzzle.movingNodeIndex = nodeIndex;
+      renderPuzzle(puzzle);
+    }
+    
+    function handleDrag(event) {
+      if (!dragState.active) return;
+      
+      var puzzle = dragState.puzzle;
+      var svg = puzzle.svg;
+      var rect = svg.getBoundingClientRect();
+      
+      // Convert mouse position to normalized coordinates
+      var mouseX = event.clientX - rect.left;
+      var mouseY = event.clientY - rect.top;
+      
+      // Account for viewBox scaling
+      var viewBox = svg.viewBox.baseVal;
+      var scaleX = viewBox.width / rect.width;
+      var scaleY = viewBox.height / rect.height;
+      
+      var svgX = mouseX * scaleX;
+      var svgY = mouseY * scaleY;
+      
+      // Convert to normalized 0-1 coordinates
+      var w = puzzle.width, h = puzzle.height;
+      var normX = (svgX - 10) / (w - 20) + dragState.offsetX;
+      var normY = (svgY - 10) / (h - 20) + dragState.offsetY;
+      
+      // Clamp to bounds
+      normX = Math.max(0.02, Math.min(0.98, normX));
+      normY = Math.max(0.02, Math.min(0.98, normY));
+      
+      dragState.node[0] = normX;
+      dragState.node[1] = normY;
+      
+      intersections(puzzle.graph.links);
+      renderPuzzle(puzzle);
+      updateStatus();
+    }
+    
+    function endDrag() {
+      if (!dragState.active) return;
+      
+      var puzzle = dragState.puzzle;
+      var node = dragState.node;
+      var fromX = dragState.startX;
+      var fromY = dragState.startY;
+      var toX = node[0];
+      var toY = node[1];
+      
+      puzzle.movingNodeIndex = -1;
+      puzzle.moves++;
+      puzzle.lastStrategy = 'manual';
+      
+      // Log the move for analysis
+      var crossingsBefore = puzzle.history[puzzle.historyIndex].crossings;
+      var crossingsAfter = puzzle.count;
+      var improvement = crossingsBefore - crossingsAfter;
+      
+      console.log('Move #' + puzzle.moves + ': node ' + dragState.nodeIndex + 
+        ' from (' + fromX.toFixed(3) + ',' + fromY.toFixed(3) + ')' +
+        ' to (' + toX.toFixed(3) + ',' + toY.toFixed(3) + ')' +
+        ' | crossings: ' + crossingsBefore + ' -> ' + crossingsAfter +
+        ' (' + (improvement >= 0 ? '+' : '') + improvement + ')');
+      
+      // Log to move history file
+      logMoveHistory(puzzle.moves, dragState.nodeIndex, fromX, fromY, toX, toY, crossingsBefore, crossingsAfter, 'manual');
+      
+      // Save state after drag
+      saveState(puzzle);
+      
+      dragState.active = false;
+      dragState.node = null;
+      dragState.puzzle = null;
+      
+      renderPuzzle(puzzle);
+      updateStatus();
+      try { saveStateToFile(puzzle); } catch(e) { console.error('saveStateToFile error:', e); }
+    }
+    
+    // Global mouse handlers
+    document.addEventListener('mousemove', handleDrag);
+    document.addEventListener('mouseup', endDrag);
+    
+    // ============ MAIN ============
+    
+    var puzzles = [];        // Displayed puzzles
+    var backgroundPuzzles = []; // Additional puzzles running in background
+    var running = false;
+    var intervalId = null;
+    var stats = { totalSolved: 0, totalStuck: 0, totalMoves: 0, bestSolve: Infinity, strategyTotals: {} };
+    
+    function createPuzzles() {
+      try {
+        console.log('createPuzzles starting...');
+        var numNodes = parseInt(document.getElementById('num-nodes').value) || 40;
+        var container = document.getElementById('puzzle-container');
+        container.innerHTML = '';
+        puzzles = [];
+        running = false;
+        document.getElementById('btn-run').textContent = 'Run';
+        
+        var header = document.createElement('div');
+        header.className = 'puzzle-header';
+        header.textContent = 'New puzzle';
+        container.appendChild(header);
+        
+        var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', '0 0 600 500');
+        svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        container.appendChild(svg);
+        
+        console.log('Creating graph...');
+        var graph = scramble(planarGraph(numNodes));
+        console.log('Graph created with', graph.nodes.length, 'nodes');
+        
+        var puzzle = {
+          id: 0,
+          graph: graph,
+          svg: svg,
+          header: header,
+          width: 600,
+          height: 500,
+          count: 0,
+          moves: 0,
+          status: 'running',
+          lastStrategy: null,
+          stuckCount: 0,
+          history: [],
+          historyIndex: -1,
+          movingNodeIndex: -1
+        };
+        puzzles.push(puzzle);
+        puzzle.count = intersections(graph.links);
+        selectedNodeIndex = -1;
+        saveState(puzzle);
+        console.log('Rendering...');
+        renderPuzzle(puzzle);
+        updateStatus();
+        console.log('createPuzzles done');
+        try { saveStateToFile(puzzle); } catch(e) { console.error('saveStateToFile error:', e); }
+      } catch(e) {
+        console.error('createPuzzles error:', e);
+      }
+    }
+    
+    function stepAll(callback) {
+      if (puzzles.length === 0) {
+        if (callback) callback(false);
+        return;
+      }
+      
+      var puzzle = puzzles[0];
+      if (puzzle.status !== 'running' || puzzle.animating) {
+        if (callback) callback(false);
+        return;
+      }
+      
+      puzzle.animating = true;
+      executeStrategy(puzzle, 'auto', function(continued) {
+        puzzle.animating = false;
+        updateStatus();
+        if (callback) callback(continued && puzzle.status === 'running');
+      });
+    }
+    
+    // Count conflict-free (yellow) vertices
+    function countConflictFree(graph) {
+      return graph.nodes.filter(function(n) { return !n.intersection; }).length;
+    }
+    
+    
+    function updateStatus() {
+      if (puzzles.length === 0) return;
+      
+      var p = puzzles[0];
+      var graph = p.graph;
+      var conflictFree = countConflictFree(graph);
+      var clumps = findClumps(graph);
+      var largestClump = clumps.length > 0 ? Math.max.apply(null, clumps.map(function(c) { return c.length; })) : 0;
+      
+      var statusText = p.count + ' crossings';
+      statusText += ' | ' + conflictFree + '/' + graph.nodes.length + ' clear';
+      statusText += ' | ' + clumps.length + ' clumps (max ' + largestClump + ')';
+      statusText += ' | ' + p.moves + ' moves';
+      if (p.status === 'solved') statusText += ' | SOLVED!';
+      
+      document.getElementById('status').textContent = statusText;
+    }
+    
+    function updateGlobalStats() {
+      puzzles.forEach(function(p) {
+        if (p.status === 'solved' && !p.counted) {
+          stats.totalSolved++;
+          stats.totalMoves += p.moves;
+          stats.bestSolve = Math.min(stats.bestSolve, p.moves);
+          p.counted = true;
+          
+          // Track strategy success
+          if (p.metrics && p.metrics.strategySuccess) {
+            Object.keys(p.metrics.strategySuccess).forEach(function(k) {
+              stats.strategyTotals[k] = (stats.strategyTotals[k] || 0) + p.metrics.strategySuccess[k];
+            });
+          }
+        } else if (p.status === 'stuck' && !p.counted) {
+          stats.totalStuck++;
+          p.counted = true;
+        }
+      });
+    }
+    
+    function start() {
+      if (running) {
+        running = false;
+        document.getElementById('btn-run').textContent = 'Run';
+        return;
+      }
+      
+      running = true;
+      document.getElementById('btn-run').textContent = 'Stop';
+      
+      function tick() {
+        if (!running) return;
+        
+        var speed = parseInt(document.getElementById('speed').value);
+        var delay = Math.max(10, 200 - speed * 2);
+        
+        stepAll(function(anyActive) {
+          if (anyActive && running) {
+            setTimeout(tick, delay);
+          } else if (!anyActive) {
+            running = false;
+            document.getElementById('btn-run').textContent = 'Run';
+          }
+        });
+      }
+      tick();
+    }
+    
+    document.getElementById('reset-btn').addEventListener('click', createPuzzles);
+    
+    // Move buttons
+    document.getElementById('btn-minimize').addEventListener('click', function() {
+      if (puzzles.length > 0 && !puzzles[0].animating) {
+        executeStrategy(puzzles[0], 'minimize', function() { updateStatus(); });
+      }
+    });
+    document.getElementById('btn-grow').addEventListener('click', function() {
+      if (puzzles.length > 0 && !puzzles[0].animating) {
+        executeStrategy(puzzles[0], 'grow', function() { updateStatus(); });
+      }
+    });
+    document.getElementById('btn-shift').addEventListener('click', function() {
+      if (puzzles.length > 0 && !puzzles[0].animating) {
+        executeStrategy(puzzles[0], 'shift', function() { updateStatus(); });
+      }
+    });
+    document.getElementById('btn-grid').addEventListener('click', function() {
+      if (puzzles.length > 0 && !puzzles[0].animating) {
+        executeStrategy(puzzles[0], 'grid', function() { updateStatus(); });
+      }
+    });
+    document.getElementById('btn-escape').addEventListener('click', function() {
+      if (puzzles.length > 0 && !puzzles[0].animating) {
+        executeStrategy(puzzles[0], 'escape', function() { updateStatus(); });
+      }
+    });
+    
+    // Step button - single auto move
+    document.getElementById('btn-step').addEventListener('click', function() {
+      if (puzzles.length > 0 && !puzzles[0].animating) {
+        executeStrategy(puzzles[0], 'auto', function() { updateStatus(); });
+      }
+    });
+    
+    // Run/Pause button
+    document.getElementById('btn-run').addEventListener('click', start);
+    
+    // History buttons
+    document.getElementById('btn-back').addEventListener('click', function() {
+      if (puzzles.length > 0) goBack(puzzles[0]);
+    });
+    document.getElementById('btn-forward').addEventListener('click', function() {
+      if (puzzles.length > 0) goForward(puzzles[0]);
+    });
+    
+    function exportStats() {
+      var report = {
+        timestamp: new Date().toISOString(),
+        summary: {
+          totalSolved: stats.totalSolved,
+          totalStuck: stats.totalStuck,
+          solveRate: stats.totalSolved + stats.totalStuck > 0 
+            ? ((stats.totalSolved / (stats.totalSolved + stats.totalStuck)) * 100).toFixed(1) + '%' 
+            : '0%',
+          totalMoves: stats.totalMoves,
+          bestSolve: stats.bestSolve < Infinity ? stats.bestSolve : null,
+          avgMovesPerSolve: stats.totalSolved > 0 
+            ? (stats.totalMoves / stats.totalSolved).toFixed(1) 
+            : null
+        },
+        strategyBreakdown: stats.strategyTotals,
+        currentPuzzles: puzzles.map(function(p) {
+          return {
+            id: p.id,
+            status: p.status,
+            moves: p.moves,
+            crossings: p.count,
+            lastStrategy: p.lastStrategy,
+            metrics: p.metrics
+          };
+        })
+      };
+      
+      // Try to write to file (Electron) or download
+      var json = JSON.stringify(report, null, 2);
+      
+      // Create download link
+      var blob = new Blob([json], {type: 'application/json'});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'dashboard-stats.json';
+      a.click();
+      URL.revokeObjectURL(url);
+      
+      // Also log to console
+      console.log('Stats exported:', report);
+    }
+    
+    // Auto-export every 30 seconds if running
+    setInterval(function() {
+      if (running && stats.totalSolved + stats.totalStuck > 0) {
+        var report = {
+          timestamp: new Date().toISOString(),
+          totalSolved: stats.totalSolved,
+          totalStuck: stats.totalStuck,
+          solveRate: ((stats.totalSolved / (stats.totalSolved + stats.totalStuck)) * 100).toFixed(1) + '%',
+          strategyTotals: stats.strategyTotals
+        };
+        console.log('Auto-stats:', report);
+        
+        // Try to write to file if in Node context
+        if (typeof require !== 'undefined') {
+          try {
+            var fs = require('fs');
+            fs.writeFileSync('dashboard-stats.json', JSON.stringify(report, null, 2));
+          } catch(e) {}
+        }
+      }
+    }, 30000);
+    
+    // ============ AI MOVE WATCHER ============
+    // Watch for ai-move.json and apply moves from AI
+    var lastAiMoveTime = 0;
+    
+    function checkAiMove() {
+      if (typeof require === 'undefined') return;
+      
+      try {
+        var fs = require('fs');
+        var path = require('path');
+        var filePath = path.join(__dirname || '.', 'ai-move.json');
+        
+        if (!fs.existsSync(filePath)) return;
+        
+        var stat = fs.statSync(filePath);
+        var mtime = stat.mtimeMs;
+        
+        if (mtime > lastAiMoveTime) {
+          lastAiMoveTime = mtime;
+          
+          var content = fs.readFileSync(filePath, 'utf8');
+          var move = JSON.parse(content);
+          
+          if (puzzles.length > 0) {
+            var puzzle = puzzles[0];
+            var graph = puzzle.graph;
+            
+            // Handle selection: { "select": 5 }
+            if (move.select !== undefined && move.select >= 0 && move.select < graph.nodes.length) {
+              selectedNodeIndex = move.select;
+              console.log('AI Select: vertex ' + move.select);
+              renderPuzzle(puzzle);
+              updateStatus();
+              saveStateToFile(puzzle);
+            }
+            
+            // Handle move: { "vertex": 5, "x": 0.3, "y": 0.7 }
+            if (move.vertex !== undefined && move.x !== undefined && move.y !== undefined) {
+              if (move.vertex >= 0 && move.vertex < graph.nodes.length) {
+                var node = graph.nodes[move.vertex];
+                var fromX = node[0], fromY = node[1];
+                var crossingsBefore = puzzle.count;
+                
+                // Apply the move
+                node[0] = Math.max(0.02, Math.min(0.98, move.x));
+                node[1] = Math.max(0.02, Math.min(0.98, move.y));
+                
+                puzzle.moves++;
+                puzzle.lastStrategy = 'ai';
+                intersections(graph.links);
+                var crossingsAfter = puzzle.count;
+                
+                console.log('AI Move: vertex ' + move.vertex + 
+                  ' from (' + fromX.toFixed(3) + ',' + fromY.toFixed(3) + ')' +
+                  ' to (' + node[0].toFixed(3) + ',' + node[1].toFixed(3) + ')');
+                
+                saveState(puzzle);
+                renderPuzzle(puzzle);
+                updateStatus();
+                saveStateToFile(puzzle);
+                
+                // Log to move history
+                logMoveHistory(puzzle.moves, move.vertex, fromX, fromY, node[0], node[1], crossingsBefore, crossingsAfter, 'ai');
+              }
+            }
+          }
+        }
+      } catch(e) {
+        // File doesn't exist or parse error - ignore
+      }
+    }
+    
+    // Poll for AI moves every 500ms
+    setInterval(checkAiMove, 500);
+    
+    // Initialize
+    createPuzzles();
+  </script>
+</body>
+</html>

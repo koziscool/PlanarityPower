@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Planarity Solver Dashboard</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 10px;
+      font-family: sans-serif;
+      background: #1a1a1a;
+      color: #fff;
+    }
+    .controls {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      margin-bottom: 10px;
+      padding: 10px;
+      background: #333;
+      border-radius: 5px;
+    }
+    .controls button {
+      padding: 8px 16px;
+      margin-right: 10px;
+      cursor: pointer;
+    }
+    .controls label {
+      margin-right: 20px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+    .puzzle {
+      background: #fff;
+      border-radius: 5px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .puzzle svg {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+    }
+    .puzzle-header {
+      background: #333;
+      color: #fff;
+      padding: 5px 10px;
+      font-size: 11px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .puzzle-header.solved { background: #060; }
+    .puzzle-header.stuck { background: #600; }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <label>Nodes: <input type="number" id="num-nodes" value="30" min="10" max="60" style="width:50px"></label>
+    <label>Speed: <input type="range" id="speed" min="1" max="100" value="70" style="width:100px"></label>
+    <button id="start-btn">Start</button>
+    <button id="add-btn">+6 More</button>
+    <button id="reset-btn">Clear All</button>
+    <span id="status" style="margin-left: 20px;"></span>
+  </div>
+  <div class="grid" id="grid"></div>
+
+  <script src="solver.js"></script>
+  <script>
+    // Import solver
+    var Solver = window.Solver;
+    if (typeof require !== 'undefined' && !Solver) {
+      try { Solver = require('./solver.js'); } catch(e) {}
+    }
+    
+    var intersections = Solver.intersections;
+    var planarGraph = Solver.planarGraph;
+    var scramble = Solver.scramble;
+    var findBestMove = Solver.findBestMove;
+    var findBottleneckMove = Solver.findBottleneckMove;
+    var findGridMove = Solver.findGridMove;
+    var findGrowClumpMove = Solver.findGrowClumpMove;
+    var findEscapeMove = Solver.findEscapeMove;
+    
+    var puzzles = [];
+    var running = false;
+    var stats = { solved: 0, stuck: 0, totalMoves: 0 };
+    
+    function renderPuzzle(puzzle) {
+      var svg = puzzle.svg;
+      var w = 400, h = 300;
+      var graph = puzzle.graph;
+      puzzle.count = intersections(graph.links);
+      
+      var scaleX = function(v) { return 10 + v * (w - 20); };
+      var scaleY = function(v) { return 10 + v * (h - 20); };
+      
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      
+      graph.links.forEach(function(link) {
+        var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', scaleX(link[0][0]));
+        line.setAttribute('y1', scaleY(link[0][1]));
+        line.setAttribute('x2', scaleX(link[1][0]));
+        line.setAttribute('y2', scaleY(link[1][1]));
+        line.setAttribute('stroke', link.intersection ? '#000' : '#fc0');
+        line.setAttribute('stroke-width', '0.8');
+        svg.appendChild(line);
+      });
+      
+      graph.nodes.forEach(function(node) {
+        var circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', scaleX(node[0]));
+        circle.setAttribute('cy', scaleY(node[1]));
+        circle.setAttribute('r', '2.5');
+        circle.setAttribute('fill', node.intersection ? '#0cf' : '#fc0');
+        circle.setAttribute('stroke', '#000');
+        circle.setAttribute('stroke-width', '0.3');
+        svg.appendChild(circle);
+      });
+      
+      puzzle.header.className = 'puzzle-header' + (puzzle.status === 'solved' ? ' solved' : (puzzle.status === 'stuck' ? ' stuck' : ''));
+      puzzle.header.innerHTML = '<span>' + puzzle.count + ' crossings | ' + puzzle.moves + ' moves</span><span>' + (puzzle.lastStrategy || '-') + '</span>';
+    }
+    
+    function solverStep(puzzle, callback) {
+      var graph = puzzle.graph;
+      puzzle.count = intersections(graph.links);
+      
+      if (puzzle.count === 0) {
+        puzzle.status = 'solved';
+        if (!puzzle.counted) { 
+          stats.solved++; 
+          puzzle.counted = true;
+          addPuzzleBatch(1); // Add a new puzzle immediately
+        }
+        callback(false);
+        return;
+      }
+      
+      // Stage-aware strategy selection
+      var move = null;
+      
+      // Early game (many crossings): prioritize bottleneck moves
+      if (puzzle.count > 50) {
+        move = findBottleneckMove(graph, 25);
+        if (!move || move.improvement <= 0) {
+          move = findGrowClumpMove(graph);
+        }
+        if (!move || move.improvement <= 0) {
+          move = findBestMove(graph, 20);
+        }
+      }
+      // Mid game: balance bottleneck and clump growing
+      else if (puzzle.count > 15) {
+        move = findGrowClumpMove(graph);
+        if (!move || move.improvement <= 0) {
+          move = findBottleneckMove(graph, 20);
+        }
+        if (!move || move.improvement <= 0) {
+          move = findBestMove(graph, 20);
+        }
+      }
+      // Late game: grid search becomes viable
+      else {
+        move = findGridMove(graph);
+        if (!move || move.improvement <= 0) {
+          move = findGrowClumpMove(graph);
+        }
+        if (!move || move.improvement <= 0) {
+          move = findBottleneckMove(graph, 15);
+        }
+        if (!move || move.improvement <= 0) {
+          move = findBestMove(graph, 30);
+        }
+      }
+      
+      if (move && move.improvement > 0) {
+        move.node[0] = move.toX;
+        move.node[1] = move.toY;
+        puzzle.moves++;
+        puzzle.lastStrategy = move.strategy;
+        puzzle.stuckCount = 0;
+        stats.totalMoves++;
+        renderPuzzle(puzzle);
+        callback(true);
+      } else {
+        puzzle.stuckCount = (puzzle.stuckCount || 0) + 1;
+        if (puzzle.stuckCount > 30) {
+          puzzle.status = 'stuck';
+          if (!puzzle.counted) { 
+            stats.stuck++; 
+            puzzle.counted = true;
+            addPuzzleBatch(1); // Add a new puzzle immediately
+          }
+          callback(false);
+          return;
+        }
+        var escape = findEscapeMove(graph);
+        if (escape) {
+          escape.node[0] = escape.toX;
+          escape.node[1] = escape.toY;
+          puzzle.moves++;
+          puzzle.lastStrategy = 'escape';
+          stats.totalMoves++;
+        }
+        renderPuzzle(puzzle);
+        callback(true);
+      }
+    }
+    
+    var puzzleIdCounter = 0;
+    var puzzleRowHeight = 0;
+    
+    function initRowHeight() {
+      var controlsHeight = document.querySelector('.controls').offsetHeight;
+      var availableHeight = window.innerHeight - controlsHeight - 30; // 30 for padding/gaps
+      puzzleRowHeight = Math.floor(availableHeight / 2);
+      document.getElementById('grid').style.gridAutoRows = puzzleRowHeight + 'px';
+    }
+    
+    function addPuzzleBatch(count) {
+      var numNodes = parseInt(document.getElementById('num-nodes').value) || 30;
+      var grid = document.getElementById('grid');
+      count = count || 3;
+      
+      for (var i = 0; i < count; i++) {
+        var div = document.createElement('div');
+        div.className = 'puzzle';
+        
+        var header = document.createElement('div');
+        header.className = 'puzzle-header';
+        div.appendChild(header);
+        
+        var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', '0 0 400 300');
+        svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        div.appendChild(svg);
+        
+        grid.appendChild(div);
+        
+        var puzzle = {
+          id: puzzleIdCounter++,
+          graph: scramble(planarGraph(numNodes)),
+          svg: svg,
+          header: header,
+          count: 0,
+          moves: 0,
+          status: 'running',
+          lastStrategy: null,
+          stuckCount: 0,
+          counted: false
+        };
+        puzzles.push(puzzle);
+        puzzle.count = intersections(puzzle.graph.links);
+        renderPuzzle(puzzle);
+      }
+      updateStatus();
+      // Scroll to show new puzzles
+      setTimeout(function() { window.scrollTo(0, document.body.scrollHeight); }, 50);
+    }
+    
+    function createPuzzles() {
+      var grid = document.getElementById('grid');
+      grid.innerHTML = '';
+      puzzles = [];
+      puzzleIdCounter = 0;
+      stats = { solved: 0, stuck: 0, totalMoves: 0 };
+      addPuzzleBatch(6);
+    }
+    
+    function updateStatus() {
+      var active = puzzles.filter(function(p) { return p.status === 'running'; }).length;
+      document.getElementById('status').textContent = 
+        'Solved: ' + stats.solved + ' | Stuck: ' + stats.stuck + ' | Active: ' + active + ' | Total: ' + puzzles.length + ' | Moves: ' + stats.totalMoves;
+    }
+    
+    function stepAll(callback) {
+      var toStep = puzzles.filter(function(p) { return p.status === 'running'; });
+      var idx = 0;
+      
+      function next() {
+        if (idx >= toStep.length) {
+          updateStatus();
+          var stillActive = puzzles.filter(function(p) { return p.status === 'running'; }).length;
+          callback(stillActive > 0);
+          return;
+        }
+        solverStep(toStep[idx], function() {
+          idx++;
+          next();
+        });
+      }
+      next();
+    }
+    
+    function start() {
+      if (running) {
+        running = false;
+        document.getElementById('start-btn').textContent = 'Start';
+        return;
+      }
+      running = true;
+      document.getElementById('start-btn').textContent = 'Stop';
+      
+      function tick() {
+        if (!running) return;
+        var speed = parseInt(document.getElementById('speed').value);
+        var delay = Math.max(5, 150 - speed);
+        
+        stepAll(function(anyActive) {
+          if (anyActive && running) {
+            setTimeout(tick, delay);
+          } else {
+            running = false;
+            document.getElementById('start-btn').textContent = 'Start';
+          }
+        });
+      }
+      tick();
+    }
+    
+    document.getElementById('start-btn').addEventListener('click', start);
+    document.getElementById('add-btn').addEventListener('click', function() { addPuzzleBatch(6); });
+    document.getElementById('reset-btn').addEventListener('click', createPuzzles);
+    
+    initRowHeight();
+    createPuzzles();
+  </script>
+</body>
+</html>

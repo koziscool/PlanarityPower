@@ -1,3 +1,12 @@
+// Import core functions from solver.js (loaded before this file)
+var Solver = window.Solver;
+var cross = Solver.cross;
+var intersect = Solver.intersect;
+var intersections = Solver.intersections;
+var planarGraph = Solver.planarGraph;
+var scramble = Solver.scramble;
+var getNeighbors = Solver.getNeighbors;
+
 var w = 1000,
     h = 600,
     p = 7,
@@ -120,105 +129,8 @@ function update() {
       .classed("selected", function(d) { return d === selectedNode; });
 }
 
-// Scramble the node positions.
-function scramble(graph) {
-  if (graph.nodes.length < 4) return graph;
-  do {
-    graph.nodes.forEach(function(node) {
-      node[0] = Math.random();
-      node[1] = Math.random();
-    });
-  } while (!intersections(graph.links));
-  return graph;
-}
-
-// Generates a random planar graph with *n* nodes.
-function planarGraph(n) {
-  var points = [],
-      links = [],
-      i = -1,
-      j;
-  while (++i < n) points[i] = [Math.random(), Math.random()];
-  i = -1; while (++i < n) {
-    addPlanarLink([points[i], points[~~(Math.random() * n)]], links);
-  }
-  i = -1; while (++i < n) {
-    j = i; while (++j < n) addPlanarLink([points[i], points[j]], links);
-  }
-  return {nodes: points, links: links};
-}
-
-// Adds a link if it doesn't intersect with anything.
-function addPlanarLink(link, links) {
-  if (!links.some(function(to) { return intersect(link, to); })) {
-    links.push(link);
-  }
-}
-
-// Counts the number of intersections for a given array of links.
-function intersections(links) {
-  var n = links.length,
-      i = -1,
-      j,
-      x,
-      count = 0;
-  // Reset flags.
-  while (++i < n) {
-    (x = links[i]).intersection = false;
-    x[0].intersection = false;
-    x[1].intersection = false;
-  }
-  i = -1; while (++i < n) {
-    x = links[i];
-    j = i; while (++j < n) {
-      if (intersect(x, links[j])) {
-        x.intersection =
-            x[0].intersection =
-            x[1].intersection =
-            links[j].intersection =
-            links[j][0].intersection =
-            links[j][1].intersection = true;
-        count++;
-      }
-    }
-  }
-  return count;
-}
-
-// Returns true if two line segments intersect.
-// Based on http://stackoverflow.com/a/565282/64009
-function intersect(a, b) {
-  // Check if the segments are exactly the same (or just reversed).
-  if (a[0] === b[0] && a[1] === b[1] || a[0] === b[1] && a[1] === b[0]) return true;
-
-  // Represent the segments as p + tr and q + us, where t and u are scalar
-  // parameters.
-  var p = a[0],
-      r = [a[1][0] - p[0], a[1][1] - p[1]],
-      q = b[0],
-      s = [b[1][0] - q[0], b[1][1] - q[1]];
-
-  // Solve p + tr = q + us to find an intersection point.
-  // First, cross both sides with s:
-  //   (p + tr) × s = (q + us) × s
-  // We know that s × s = 0, so this can be rewritten as:
-  //   t(r × s) = (q − p) × s
-  // Then solve for t to get:
-  //   t = (q − p) × s / (r × s)
-  // Similarly, for u we get:
-  //   u = (q − p) × r / (r × s)
-  var rxs = cross(r, s),
-      q_p = [q[0] - p[0], q[1] - p[1]],
-      t = cross(q_p, s) / rxs,
-      u = cross(q_p, r) / rxs,
-      epsilon = 1e-6;
-
-  return t > epsilon && t < 1 - epsilon && u > epsilon && u < 1 - epsilon;
-}
-
-function cross(a, b) {
-  return a[0] * b[1] - a[1] * b[0];
-}
+// Core graph functions (scramble, planarGraph, intersections, intersect, cross)
+// are now imported from solver.js at the top of this file
 
 // Show inline status message
 function showStatus(message, isError) {
@@ -433,15 +345,7 @@ function updateAnalytics() {
 var currentStrategy = 'centroid'; // 'centroid', 'force', 'random'
 var selectedNode = null; // Currently selected node for operations
 
-// Get neighbors of a node (connected via edges)
-function getNeighbors(node) {
-  var neighbors = [];
-  graph.links.forEach(function(link) {
-    if (link[0] === node) neighbors.push(link[1]);
-    else if (link[1] === node) neighbors.push(link[0]);
-  });
-  return neighbors;
-}
+// getNeighbors is imported from solver.js - use as getNeighbors(graph, node)
 
 // Calculate centroid of a set of nodes
 function centroid(nodes) {
@@ -463,7 +367,7 @@ function findCentroidMove() {
   graph.nodes.forEach(function(node, i) {
     if (!node.intersection) return;
     
-    var neighbors = getNeighbors(node);
+    var neighbors = getNeighbors(graph, node);
     if (neighbors.length === 0) return;
     
     var target = centroid(neighbors);
@@ -1285,7 +1189,7 @@ d3.select("#dump-state").on("click", function() {
         x: node[0].toFixed(4),
         y: node[1].toFixed(4),
         hasIntersection: !!node.intersection,
-        neighborCount: getNeighbors(node).length
+        neighborCount: getNeighbors(graph, node).length
       };
     }),
     intersectingNodes: graph.nodes

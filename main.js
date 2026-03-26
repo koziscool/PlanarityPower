@@ -1,8 +1,10 @@
-const { app, BrowserWindow } = require('electron')
+const { app, BrowserWindow, Menu } = require('electron')
 const path = require('path')
 
+let win
+
 function createWindow() {
-  const win = new BrowserWindow({
+  win = new BrowserWindow({
     width: 1400,
     height: 900,
     webPreferences: {
@@ -12,6 +14,23 @@ function createWindow() {
   })
 
   win.loadFile('index.html')
+  
+  const menu = Menu.buildFromTemplate([
+    {
+      label: 'App',
+      submenu: [
+        { label: 'Main Game', click: () => win.loadFile('index.html') },
+        { label: 'Interactive Training', click: () => win.loadFile('interactive.html') },
+        { label: 'Solver Dashboard', click: () => win.loadFile('solver.html') },
+        { type: 'separator' },
+        { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: () => win.reload() },
+        { label: 'Dev Tools', accelerator: 'CmdOrCtrl+Shift+I', click: () => win.webContents.toggleDevTools() },
+        { type: 'separator' },
+        { role: 'quit' }
+      ]
+    }
+  ])
+  Menu.setApplicationMenu(menu)
 }
 
 app.whenReady().then(() => {

@@ -104,6 +104,7 @@
     <label>Nodes: <input type="number" id="num-nodes" value="30" min="10" max="100" style="width:50px"></label>
     <button id="reset-btn">New Graph</button>
     <label style="margin-left: 15px;"><input type="checkbox" id="show-numbers"> Show vertex #</label>
+    <label style="margin-left: 15px;"><input type="checkbox" id="pause-on-escape" checked> Pause on escape</label>
     <span id="status" style="margin-left: 20px;"></span>
   </div>
   
@@ -256,6 +257,11 @@
       
       // Use shared solver step from solver.js
       puzzle.solverState = puzzle.solverState || {};
+      
+      // Check if we should pause before escape moves
+      var pauseOnEscape = document.getElementById('pause-on-escape').checked;
+      puzzle.solverState.pauseBeforeEscape = pauseOnEscape;
+      
       var result = solverStepCore(graph, puzzle.solverState);
       
       if (result.done) {
@@ -263,6 +269,17 @@
         puzzle.count = 0;
         renderPuzzle(puzzle);
         updateStatus();
+        if (callback) callback(false);
+        return;
+      }
+      
+      if (result.wouldEscape) {
+        // Solver would make an escape move - pause for human intervention
+        puzzle.status = 'escape-paused';
+        puzzle.escapeStuckCount = result.stuckCount;
+        renderPuzzle(puzzle);
+        updateStatus();
+        // Stop the solver loop
         if (callback) callback(false);
         return;
       }
@@ -735,6 +752,12 @@
       puzzle.moves++;
       puzzle.lastStrategy = 'manual';
       
+      // Reset solver stuck state after manual move
+      if (puzzle.solverState) {
+        puzzle.solverState.stuckCount = 0;
+      }
+      puzzle.status = 'running';
+      
       // Log the move for analysis
       var crossingsBefore = puzzle.history[puzzle.historyIndex].crossings;
       var crossingsAfter = puzzle.count;
@@ -879,6 +902,8 @@
       statusText += ' | ' + clumps.length + ' clumps (max ' + largestClump + ')';
       statusText += ' | ' + moveDisplay;
       if (p.status === 'solved') statusText += ' | SOLVED!';
+      if (p.status === 'escape-paused') statusText += ' | PAUSED (would escape #' + (p.escapeStuckCount || 1) + ') - make moves then Run';
+      if (p.status === 'stuck') statusText += ' | STUCK';
       
       document.getElementById('status').textContent = statusText;
     }

@@ -77,6 +77,88 @@
     return neighbors;
   }
   
+  // ============ ANCHOR SCORING ============
+  // Compute how "anchored" a vertex is - high score means fixed/constraining,
+  // low score means free-floating/easily moveable
+  
+  function anchorScore(graph, node) {
+    var neighbors = getNeighbors(graph, node);
+    if (neighbors.length === 0) return 0;
+    
+    // Factor 1: What fraction of neighbors are conflict-free (yellow)?
+    var yellowCount = 0;
+    for (var i = 0; i < neighbors.length; i++) {
+      if (!neighbors[i].intersection) yellowCount++;
+    }
+    var yellowRatio = yellowCount / neighbors.length;
+    
+    // Factor 2: How directionally clustered are the neighbors?
+    // If all neighbors are in one direction, this vertex is strongly anchored
+    var cx = node[0], cy = node[1];
+    var angles = [];
+    for (var i = 0; i < neighbors.length; i++) {
+      var dx = neighbors[i][0] - cx;
+      var dy = neighbors[i][1] - cy;
+      angles.push(Math.atan2(dy, dx));
+    }
+    
+    // Compute angular spread - low spread = clustered = high anchor
+    var directionScore = 0;
+    if (angles.length >= 2) {
+      angles.sort(function(a, b) { return a - b; });
+      var maxGap = 0;
+      for (var i = 0; i < angles.length; i++) {
+        var next = (i + 1) % angles.length;
+        var gap = angles[next] - angles[i];
+        if (next === 0) gap += 2 * Math.PI; // wrap around
+        if (gap > maxGap) maxGap = gap;
+      }
+      // maxGap near 2*PI means neighbors clustered in one direction
+      // maxGap near PI means neighbors spread evenly
+      directionScore = (maxGap - Math.PI) / Math.PI; // 0 to 1
+      directionScore = Math.max(0, Math.min(1, directionScore));
+    }
+    
+    // Factor 3: Neighbor degree - high-degree neighbors are more anchoring
+    var avgNeighborDegree = 0;
+    for (var i = 0; i < neighbors.length; i++) {
+      avgNeighborDegree += getNeighbors(graph, neighbors[i]).length;
+    }
+    avgNeighborDegree /= neighbors.length;
+    var degreeScore = Math.min(1, avgNeighborDegree / 10); // normalize to 0-1
+    
+    // Combine factors: yellow neighbors matter most, then direction, then degree
+    var score = yellowRatio * 0.5 + directionScore * 0.3 + degreeScore * 0.2;
+    return score;
+  }
+  
+  // Compute weighted centroid - weight neighbors by their anchor score
+  // Anchored (yellow, fixed) neighbors pull harder than free-floating ones
+  function weightedCentroid(graph, node) {
+    var neighbors = getNeighbors(graph, node);
+    if (neighbors.length === 0) return null;
+    
+    var totalWeight = 0;
+    var wx = 0, wy = 0;
+    
+    for (var i = 0; i < neighbors.length; i++) {
+      var neighbor = neighbors[i];
+      // Base weight: conflict-free neighbors get higher weight
+      var weight = neighbor.intersection ? 0.3 : 1.0;
+      
+      // Boost weight by neighbor's anchor score
+      var neighborAnchor = anchorScore(graph, neighbor);
+      weight *= (0.5 + neighborAnchor); // range 0.5 to 1.5 multiplier
+      
+      wx += neighbor[0] * weight;
+      wy += neighbor[1] * weight;
+      totalWeight += weight;
+    }
+    
+    if (totalWeight === 0) return centroid(neighbors);
+    return [wx / totalWeight, wy / totalWeight];
+  }
+  
   // Check if position is too close to any other node
   var MIN_NODE_DIST = 0.01; // minimum distance between nodes (~4 pixels)
   
@@ -699,11 +781,28 @@
       return { done: false, improved: true, move: best, count: newCount };
     }
     
+    // Before escaping, try anchored centroid move
+    // This uses weighted centroid that prioritizes fixed/yellow neighbors
+    best = findAnchoredCentroidMove(graph);
+    if (best && best.improvement >= 0) {
+      best.node[0] = best.toX;
+      best.node[1] = best.toY;
+      var newCount = intersections(graph.links);
+      // Don't reset stuck count for zero-improvement moves
+      if (best.improvement > 0) state.stuckCount = 0;
+      return { done: false, improved: best.improvement > 0, move: best, count: newCount };
+    }
+    
     // Stuck - try escape
     state.stuckCount = (state.stuckCount || 0) + 1;
     
     if (state.stuckCount > 50) {
       return { done: false, stuck: true, count: count };
+    }
+    
+    // If pauseBeforeEscape is set, signal that we would escape instead of doing it
+    if (state.pauseBeforeEscape) {
+      return { done: false, wouldEscape: true, count: count, stuckCount: state.stuckCount };
     }
     
     var escape = findEscapeMove(graph);
@@ -1065,6 +1164,71 @@
     return bestMove;
   }
   
+  // Strategy: Move toward WEIGHTED centroid (anchored neighbors pull harder)
+  function findAnchoredCentroidMove(graph) {
+    var count = intersections(graph.links);
+    if (count === 0) return null;
+    
+    var bestMove = null;
+    var bestScore = -Infinity;
+    
+    for (var i = 0; i < graph.nodes.length; i++) {
+      var node = graph.nodes[i];
+      if (!node.intersection) continue;
+      
+      var neighbors = getNeighbors(graph, node);
+      if (neighbors.length === 0) continue;
+      
+      // Use weighted centroid instead of simple centroid
+      var target = weightedCentroid(graph, node);
+      if (!target) continue;
+      
+      var originalX = node[0];
+      var originalY = node[1];
+      
+      var dx = target[0] - node[0];
+      var dy = target[1] - node[1];
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist < 0.01) continue;
+      
+      // Move more aggressively toward weighted centroid
+      var moveAmount = Math.min(0.15, dist * 0.7);
+      var newX = node[0] + (dx / dist) * moveAmount;
+      var newY = node[1] + (dy / dist) * moveAmount;
+      newX = Math.max(0.02, Math.min(0.98, newX));
+      newY = Math.max(0.02, Math.min(0.98, newY));
+      
+      // Evaluate the move
+      var delta = evaluateMoveDelta(graph, node, newX, newY, count);
+      var improvement = -delta;
+      
+      // Score: improvement matters most, but also consider the anchor score of this node
+      // Low-anchor nodes are easier to move, so slight preference for moving them
+      var nodeAnchor = anchorScore(graph, node);
+      var score = improvement * 10 + (1 - nodeAnchor) * 2 + (1 - dist);
+      
+      // Accept moves that improve OR that move low-anchor nodes toward their weighted centroid
+      if (improvement > 0 || (improvement >= 0 && nodeAnchor < 0.3 && dist > 0.05)) {
+        if (score > bestScore) {
+          bestScore = score;
+          bestMove = {
+            node: node,
+            nodeIndex: i,
+            fromX: originalX,
+            fromY: originalY,
+            toX: newX,
+            toY: newY,
+            improvement: improvement,
+            strategy: 'anchored-centroid'
+          };
+        }
+      }
+    }
+    
+    return bestMove;
+  }
+  
   // Strategy: Local refinement - try small movements in 8 directions
   function findLocalMove(graph) {
     var count = intersections(graph.links);
@@ -1258,9 +1422,12 @@
   exports.evaluateMoveDelta = evaluateMoveDelta;
   exports.getNodeEdges = getNodeEdges;
   exports.findCentroidMove = findCentroidMove;
+  exports.findAnchoredCentroidMove = findAnchoredCentroidMove;
   exports.findLocalMove = findLocalMove;
   exports.findUncrossMove = findUncrossMove;
   exports.findWiggleMove = findWiggleMove;
   exports.centroid = centroid;
+  exports.weightedCentroid = weightedCentroid;
+  exports.anchorScore = anchorScore;
   
 })(typeof module !== 'undefined' && module.exports ? module.exports : (window.Solver = {}));

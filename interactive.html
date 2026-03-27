@@ -32,30 +32,6 @@
     .controls label {
       margin-right: 20px;
     }
-    .strategy-buttons {
-      display: inline-block;
-      margin-left: 20px;
-      padding: 4px 8px;
-      background: #444;
-      border-radius: 4px;
-    }
-    .strategy-buttons button {
-      padding: 4px 10px;
-      margin-right: 4px;
-      font-size: 12px;
-    }
-    .strategy-buttons button.highlight {
-      background: #f80;
-      color: white;
-    }
-    .history-buttons {
-      display: inline-block;
-      margin-left: 20px;
-    }
-    .history-buttons button {
-      padding: 4px 10px;
-      font-size: 12px;
-    }
     .main-container {
       display: flex;
       gap: 15px;
@@ -106,10 +82,6 @@
     .side-panel button:hover {
       background: #555;
     }
-    .side-panel button.highlight {
-      background: #f80;
-      border-color: #f80;
-    }
     .side-panel .section-label {
       font-size: 11px;
       color: #888;
@@ -129,8 +101,9 @@
 </head>
 <body>
   <div class="controls">
-    <label>Nodes: <input type="number" id="num-nodes" value="40" min="10" max="100" style="width:50px"></label>
+    <label>Nodes: <input type="number" id="num-nodes" value="30" min="10" max="100" style="width:50px"></label>
     <button id="reset-btn">New Graph</button>
+    <label style="margin-left: 15px;"><input type="checkbox" id="show-numbers"> Show vertex #</label>
     <span id="status" style="margin-left: 20px;"></span>
   </div>
   
@@ -138,14 +111,7 @@
     <div class="puzzle" id="puzzle-container"></div>
     
     <div class="side-panel">
-      <div class="section-label">Move</div>
-      <button id="btn-minimize">Minimize Crossings</button>
-      <button id="btn-grow">Grow Clump</button>
-      <button id="btn-shift">Shift Clump</button>
-      <button id="btn-grid">Grid Search</button>
-      <button id="btn-escape">Escape</button>
-      
-      <div class="section-label">Control</div>
+      <div class="section-label">Solver</div>
       <button id="btn-step">Step</button>
       <button id="btn-run">Run</button>
       
@@ -168,12 +134,16 @@
     
     // In Electron, Solver might need to be loaded via require
     var Solver = window.Solver;
-    if (typeof require !== 'undefined' && !Solver) {
+    var ipcRenderer = null;
+    if (typeof require !== 'undefined') {
       try {
         Solver = require('./solver.js');
         console.log('Loaded Solver via require');
+        var electron = require('electron');
+        ipcRenderer = electron.ipcRenderer;
+        console.log('IPC renderer available');
       } catch(e) {
-        console.error('Could not require solver.js:', e);
+        console.error('Could not require modules:', e);
       }
     }
     console.log('Solver object:', typeof Solver, Solver ? Object.keys(Solver) : 'undefined');
@@ -183,12 +153,9 @@
     var planarGraph = Solver.planarGraph;
     var scramble = Solver.scramble;
     var getNeighbors = Solver.getNeighbors;
-    var findBestMove = Solver.findBestMove;
-    var findGridMove = Solver.findGridMove;
-    var findEscapeMove = Solver.findEscapeMove;
-    var findGrowClumpMove = Solver.findGrowClumpMove;
-    var findMoveClumpMove = Solver.findMoveClumpMove;
+    var solverStepCore = Solver.solverStep;
     var findClumps = Solver.findClumps;
+    var findEscapeMove = Solver.findEscapeMove;
     
     // ============ HISTORY MANAGEMENT ============
     
@@ -230,6 +197,7 @@
       if (puzzle.historyIndex > 0) {
         restoreState(puzzle, puzzle.historyIndex - 1);
         updateStatus();
+        saveStateToFile(puzzle);
       }
     }
     
@@ -237,29 +205,7 @@
       if (puzzle.historyIndex < puzzle.history.length - 1) {
         restoreState(puzzle, puzzle.historyIndex + 1);
         updateStatus();
-      }
-    }
-    
-    // ============ HIGHLIGHT STRATEGY ============
-    
-    function highlightStrategy(strategy) {
-      // Clear all highlights
-      document.querySelectorAll('.side-panel button').forEach(function(btn) {
-        btn.classList.remove('highlight');
-      });
-      
-      // Highlight the used strategy
-      var btnId = {
-        'random': 'btn-minimize',
-        'centroid': 'btn-minimize',
-        'grow': 'btn-grow',
-        'shift': 'btn-shift',
-        'grid': 'btn-grid',
-        'escape': 'btn-escape'
-      }[strategy];
-      
-      if (btnId) {
-        document.getElementById(btnId).classList.add('highlight');
+        saveStateToFile(puzzle);
       }
     }
     
@@ -295,9 +241,10 @@
       requestAnimationFrame(frame);
     }
     
-    // ============ EXECUTE SPECIFIC STRATEGY ============
+    // ============ EXECUTE SOLVER STEP ============
+    // Uses the same solver logic as the dashboard (from solver.js)
     
-    function executeStrategy(puzzle, strategyName, callback) {
+    function executeStep(puzzle, callback) {
       var graph = puzzle.graph;
       puzzle.count = intersections(graph.links);
       
@@ -307,77 +254,54 @@
         return;
       }
       
-      var move = null;
+      // Use shared solver step from solver.js
+      puzzle.solverState = puzzle.solverState || {};
+      var result = solverStepCore(graph, puzzle.solverState);
       
-      if (strategyName === 'minimize') {
-        // Try all nodes × 31 positions, pick best
-        move = findBestMove(graph, 30);
-      } else if (strategyName === 'grow') {
-        move = findGrowClumpMove(graph);
-      } else if (strategyName === 'shift') {
-        // Shift clump returns a different structure, handle specially
-        var shiftMove = findMoveClumpMove(graph);
-        if (shiftMove && shiftMove.improvement > 0) {
-          // Save state before move
-          saveState(puzzle);
-          
-          // Apply the shift
-          shiftMove.clump.forEach(function(node) {
-            node[0] += shiftMove.dx;
-            node[1] += shiftMove.dy;
-          });
-          
-          puzzle.moves++;
-          puzzle.lastStrategy = 'shift';
-          highlightStrategy('shift');
-          intersections(graph.links);
-          renderPuzzle(puzzle);
-          saveState(puzzle);
-          updateStatus();
-          if (callback) callback(true);
-          return;
-        }
+      if (result.done) {
+        puzzle.status = 'solved';
+        puzzle.count = 0;
+        renderPuzzle(puzzle);
+        updateStatus();
         if (callback) callback(false);
         return;
-      } else if (strategyName === 'grid') {
-        move = findGridMove(graph);
-      } else if (strategyName === 'escape') {
-        move = findEscapeMove(graph);
-      } else if (strategyName === 'auto') {
-        // Auto: try grow first, then minimize, then grid, then escape
-        move = findGrowClumpMove(graph);
-        if (!move || move.improvement <= 0) {
-          move = findBestMove(graph, 30);
-        }
-        if ((!move || move.improvement <= 0) && puzzle.count <= 15) {
-          var gridMove = findGridMove(graph);
-          if (gridMove && gridMove.improvement > 0) {
-            move = gridMove;
-          }
-        }
       }
       
-      if (move) {
-        // Save state before move
-        saveState(puzzle);
+      if (result.stuck) {
+        puzzle.status = 'stuck';
+        renderPuzzle(puzzle);
+        updateStatus();
+        if (callback) callback(false);
+        return;
+      }
+      
+      if (result.move) {
+        var move = result.move;
+        var nodeIndex = graph.nodes.indexOf(move.node);
+        
+        // The solver already applied the move, so we need to undo it for animation
+        var toX = move.node[0];
+        var toY = move.node[1];
+        move.node[0] = move.fromX;
+        move.node[1] = move.fromY;
         
         puzzle.moves++;
         puzzle.lastStrategy = move.strategy;
-        highlightStrategy(move.strategy);
+        puzzle.count = result.count;
         
-        animateMove(puzzle, move.node, move.fromX, move.fromY, move.toX, move.toY, function() {
-          // Save state after move
+        animateMove(puzzle, move.node, move.fromX, move.fromY, toX, toY, function() {
+          // Log move
+          logMove(puzzle.moves, nodeIndex, toX, toY, puzzle.count, move.strategy, null);
+          
           saveState(puzzle);
           updateStatus();
-          if (callback) callback(move.improvement > 0);
+          // Keep running as long as we made a move (escape moves may not "improve" but should continue)
+          if (callback) callback(true);
         });
       } else {
+        // No move found at all
         if (callback) callback(false);
       }
-    }
-    
-    function solverStep(puzzle, callback) {
-      executeStrategy(puzzle, 'auto', callback);
     }
     
     // ============ RENDERING ============
@@ -453,10 +377,31 @@
         svg.appendChild(circle);
       });
       
-      // Update header
+      // Draw vertex numbers if enabled
+      var showNumbers = document.getElementById('show-numbers') && document.getElementById('show-numbers').checked;
+      if (showNumbers) {
+        graph.nodes.forEach(function(node, i) {
+          var text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          text.setAttribute('x', scaleX(node[0]) + 5);
+          text.setAttribute('y', scaleY(node[1]) - 5);
+          text.setAttribute('font-size', '10');
+          text.setAttribute('fill', '#333');
+          text.setAttribute('font-weight', 'bold');
+          text.setAttribute('pointer-events', 'none');
+          text.textContent = i;
+          svg.appendChild(text);
+        });
+      }
+      
+      // Update header - show current position and head position (0-indexed)
+      // If X < Y, you're rewound. If X = Y, you're at head.
+      var currentPos = puzzle.historyIndex;
+      var headPos = puzzle.history.length - 1;
+      var moveDisplay = currentPos + '/' + headPos;
+      
       var header = puzzle.header;
       header.className = 'puzzle-header' + (puzzle.status === 'solved' ? ' solved' : (puzzle.status === 'stuck' ? ' stuck' : ''));
-      header.innerHTML = '<span>P' + puzzle.id + ' | ' + puzzle.count + ' crossings | ' + puzzle.moves + ' moves</span><span>' + (puzzle.lastStrategy || '-') + '</span>';
+      header.innerHTML = '<span>P' + puzzle.id + ' | ' + puzzle.count + ' crossings | move ' + moveDisplay + '</span><span>' + (puzzle.lastStrategy || '-') + '</span>';
     }
     
     // ============ SELECTION AND STATE ============
@@ -478,6 +423,8 @@
       
       var state = {
         timestamp: new Date().toISOString(),
+        currentPosition: puzzle.historyIndex,
+        headPosition: puzzle.history.length - 1,
         moves: puzzle.moves,
         crossings: puzzle.count,
         totalVertices: graph.nodes.length,
@@ -585,50 +532,111 @@
         };
       }
       
-      // Write to file (works in Electron with nodeIntegration)
+      // Send state via IPC to main process (primary method)
+      if (ipcRenderer) {
+        ipcRenderer.send('state-update', state);
+        console.log('State sent via IPC');
+      }
+      
+      // Also write to file as backup
       if (typeof require !== 'undefined') {
         try {
           var fs = require('fs');
           var path = require('path');
           var filePath = path.join(__dirname || '.', 'dashboard-state.json');
           fs.writeFileSync(filePath, JSON.stringify(state, null, 2));
-          console.log('State saved to', filePath);
         } catch(e) {
           console.log('Could not save state file:', e.message);
-          console.log('State:', state);
         }
-      } else {
-        console.log('State:', state);
       }
     }
     
     // ============ MOVE HISTORY LOGGING ============
     
-    function logMoveHistory(moveNum, vertexIdx, fromX, fromY, toX, toY, crossingsBefore, crossingsAfter, source) {
-      if (typeof require === 'undefined') return;
+    var sessionId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    var historyFilePath = null;
+    
+    function getHistoryFilePath() {
+      if (historyFilePath) return historyFilePath;
+      if (typeof require === 'undefined') return null;
+      var path = require('path');
+      historyFilePath = path.join(__dirname || '.', 'move-history.jsonl');
+      return historyFilePath;
+    }
+    
+    function logInitialState(puzzle) {
+      var graph = puzzle.graph;
+      var entry = {
+        type: 'init',
+        ts: new Date().toISOString(),
+        session: sessionId,
+        nodes: graph.nodes.map(function(n) { 
+          return [parseFloat(n[0].toFixed(4)), parseFloat(n[1].toFixed(4))]; 
+        }),
+        edges: graph.links.map(function(l) {
+          return [graph.nodes.indexOf(l[0]), graph.nodes.indexOf(l[1])];
+        }),
+        crossings: puzzle.count
+      };
       
-      try {
-        var fs = require('fs');
-        var path = require('path');
-        var filePath = path.join(__dirname || '.', 'move-history.jsonl');
-        
-        var entry = {
-          timestamp: new Date().toISOString(),
-          move: moveNum,
-          vertex: vertexIdx,
-          from: [parseFloat(fromX.toFixed(4)), parseFloat(fromY.toFixed(4))],
-          to: [parseFloat(toX.toFixed(4)), parseFloat(toY.toFixed(4))],
-          crossings_before: crossingsBefore,
-          crossings_after: crossingsAfter,
-          change: crossingsAfter - crossingsBefore,
-          source: source
-        };
-        
-        fs.appendFileSync(filePath, JSON.stringify(entry) + '\n');
-        console.log('Move logged:', entry);
-      } catch(e) {
-        console.log('Could not log move:', e.message);
+      // Reset history via IPC
+      if (ipcRenderer) {
+        ipcRenderer.send('history-reset');
+        ipcRenderer.send('move-log', entry);
       }
+      
+      // Also write to file (backup)
+      if (typeof require !== 'undefined') {
+        try {
+          var fs = require('fs');
+          var filePath = getHistoryFilePath();
+          fs.writeFileSync(filePath, '');
+          fs.appendFileSync(filePath, JSON.stringify(entry) + '\n');
+        } catch(e) {
+          console.log('Could not log initial state to file:', e.message);
+        }
+      }
+      
+      console.log('Initial state logged:', entry.nodes.length, 'nodes,', entry.edges.length, 'edges,', entry.crossings, 'crossings');
+    }
+    
+    function logMove(moveNum, vertexIdx, toX, toY, crossingsAfter, source, alternatives) {
+      var entry = {
+        type: 'move',
+        ts: new Date().toISOString(),
+        n: moveNum,
+        v: vertexIdx,
+        to: [parseFloat(toX.toFixed(4)), parseFloat(toY.toFixed(4))],
+        x: crossingsAfter,
+        src: source
+      };
+      
+      if (alternatives && Object.keys(alternatives).length > 0) {
+        entry.alt = alternatives;
+      }
+      
+      // Send via IPC (primary)
+      if (ipcRenderer) {
+        ipcRenderer.send('move-log', entry);
+      }
+      
+      // Also write to file (backup)
+      if (typeof require !== 'undefined') {
+        try {
+          var fs = require('fs');
+          var filePath = getHistoryFilePath();
+          fs.appendFileSync(filePath, JSON.stringify(entry) + '\n');
+        } catch(e) {
+          console.log('Could not log move to file:', e.message);
+        }
+      }
+      
+      console.log('Move logged:', entry);
+    }
+    
+    // Legacy wrapper for compatibility
+    function logMoveHistory(moveNum, vertexIdx, fromX, fromY, toX, toY, crossingsBefore, crossingsAfter, source) {
+      logMove(moveNum, vertexIdx, toX, toY, crossingsAfter, source, null);
     }
     
     // ============ DRAG AND DROP ============
@@ -672,9 +680,6 @@
       dragState.startX = node[0];
       dragState.startY = node[1];
       dragState.puzzle = puzzle;
-      
-      // Save state at start of drag
-      saveState(puzzle);
       
       puzzle.movingNodeIndex = nodeIndex;
       renderPuzzle(puzzle);
@@ -811,6 +816,12 @@
         puzzles.push(puzzle);
         puzzle.count = intersections(graph.links);
         selectedNodeIndex = -1;
+        
+        // Generate new session ID and log initial state
+        sessionId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        historyFilePath = null;
+        logInitialState(puzzle);
+        
         saveState(puzzle);
         console.log('Rendering...');
         renderPuzzle(puzzle);
@@ -835,7 +846,7 @@
       }
       
       puzzle.animating = true;
-      executeStrategy(puzzle, 'auto', function(continued) {
+      executeStep(puzzle, function(continued) {
         puzzle.animating = false;
         updateStatus();
         if (callback) callback(continued && puzzle.status === 'running');
@@ -857,10 +868,16 @@
       var clumps = findClumps(graph);
       var largestClump = clumps.length > 0 ? Math.max.apply(null, clumps.map(function(c) { return c.length; })) : 0;
       
+      // Current position vs head position (0-indexed)
+      // X/Y format: X = current, Y = head. If X < Y, you're rewound.
+      var currentPos = p.historyIndex;
+      var headPos = p.history.length - 1;
+      var moveDisplay = 'move ' + currentPos + '/' + headPos;
+      
       var statusText = p.count + ' crossings';
       statusText += ' | ' + conflictFree + '/' + graph.nodes.length + ' clear';
       statusText += ' | ' + clumps.length + ' clumps (max ' + largestClump + ')';
-      statusText += ' | ' + p.moves + ' moves';
+      statusText += ' | ' + moveDisplay;
       if (p.status === 'solved') statusText += ' | SOLVED!';
       
       document.getElementById('status').textContent = statusText;
@@ -917,37 +934,10 @@
     
     document.getElementById('reset-btn').addEventListener('click', createPuzzles);
     
-    // Move buttons
-    document.getElementById('btn-minimize').addEventListener('click', function() {
-      if (puzzles.length > 0 && !puzzles[0].animating) {
-        executeStrategy(puzzles[0], 'minimize', function() { updateStatus(); });
-      }
-    });
-    document.getElementById('btn-grow').addEventListener('click', function() {
-      if (puzzles.length > 0 && !puzzles[0].animating) {
-        executeStrategy(puzzles[0], 'grow', function() { updateStatus(); });
-      }
-    });
-    document.getElementById('btn-shift').addEventListener('click', function() {
-      if (puzzles.length > 0 && !puzzles[0].animating) {
-        executeStrategy(puzzles[0], 'shift', function() { updateStatus(); });
-      }
-    });
-    document.getElementById('btn-grid').addEventListener('click', function() {
-      if (puzzles.length > 0 && !puzzles[0].animating) {
-        executeStrategy(puzzles[0], 'grid', function() { updateStatus(); });
-      }
-    });
-    document.getElementById('btn-escape').addEventListener('click', function() {
-      if (puzzles.length > 0 && !puzzles[0].animating) {
-        executeStrategy(puzzles[0], 'escape', function() { updateStatus(); });
-      }
-    });
-    
     // Step button - single auto move
     document.getElementById('btn-step').addEventListener('click', function() {
       if (puzzles.length > 0 && !puzzles[0].animating) {
-        executeStrategy(puzzles[0], 'auto', function() { updateStatus(); });
+        executeStep(puzzles[0], function() { updateStatus(); });
       }
     });
     
@@ -960,6 +950,11 @@
     });
     document.getElementById('btn-forward').addEventListener('click', function() {
       if (puzzles.length > 0) goForward(puzzles[0]);
+    });
+    
+    // Vertex numbering toggle
+    document.getElementById('show-numbers').addEventListener('change', function() {
+      if (puzzles.length > 0) renderPuzzle(puzzles[0]);
     });
     
     function exportStats() {
@@ -1100,8 +1095,41 @@
       }
     }
     
-    // Poll for AI moves every 500ms
+    // Poll for AI moves every 500ms (legacy file-based method)
     setInterval(checkAiMove, 500);
+    
+    // Listen for AI moves via IPC (preferred method)
+    if (ipcRenderer) {
+      ipcRenderer.on('ai-move', function(event, move) {
+        console.log('Received AI move via IPC:', move);
+        if (puzzles.length === 0) return;
+        
+        var puzzle = puzzles[0];
+        var graph = puzzle.graph;
+        
+        if (move.select !== undefined && move.select >= 0 && move.select < graph.nodes.length) {
+          selectedNodeIndex = move.select;
+          renderPuzzle(puzzle);
+          updateStatus();
+          saveStateToFile(puzzle);
+        }
+        
+        if (move.vertex !== undefined && move.x !== undefined && move.y !== undefined) {
+          if (move.vertex >= 0 && move.vertex < graph.nodes.length) {
+            var node = graph.nodes[move.vertex];
+            node[0] = Math.max(0.02, Math.min(0.98, move.x));
+            node[1] = Math.max(0.02, Math.min(0.98, move.y));
+            puzzle.moves++;
+            puzzle.lastStrategy = 'ai-ipc';
+            intersections(graph.links);
+            saveState(puzzle);
+            renderPuzzle(puzzle);
+            updateStatus();
+            saveStateToFile(puzzle);
+          }
+        }
+      });
+    }
     
     // Initialize
     createPuzzles();

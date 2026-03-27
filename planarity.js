@@ -6,6 +6,10 @@ var intersections = Solver.intersections;
 var planarGraph = Solver.planarGraph;
 var scramble = Solver.scramble;
 var getNeighbors = Solver.getNeighbors;
+var findCentroidMove = Solver.findCentroidMove;
+var findLocalMove = Solver.findLocalMove;
+var findUncrossMove = Solver.findUncrossMove;
+var findWiggleMove = Solver.findWiggleMove;
 
 var w = 1000,
     h = 600,
@@ -76,11 +80,32 @@ function generate() {
   start = +new Date;
   lastCount = null;
 
+  // Clear history for new game
+  clearMoveHistory();
+
   // Apply canvas size before generating
   resizeCanvas();
 
   graph = scramble(planarGraph(+d3.select("#nodes").property("value")));
   update();
+  
+  // Log initial state
+  var initialCrossings = count;
+  if (typeof require !== 'undefined') {
+    try {
+      var fs = require('fs');
+      var initialEntry = {
+        timestamp: new Date().toISOString(),
+        sessionId: sessionId,
+        type: 'initial',
+        nodeCount: graph.nodes.length,
+        edgeCount: graph.links.length,
+        crossings: initialCrossings,
+        graphSnapshot: snapshotGraph()
+      };
+      fs.appendFileSync('move-history.jsonl', JSON.stringify(initialEntry) + '\n');
+    } catch (e) {}
+  }
 }
 
 function update() {
@@ -313,6 +338,101 @@ d3.select("#resume").on("click", resumeGame);
 var solverRunning = false;
 var solverTimeout = null;
 
+// ============ MOVE HISTORY ============
+
+var moveHistory = [];
+var sessionId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+function snapshotGraph() {
+  return {
+    nodes: graph.nodes.map(function(n) { return [n[0], n[1]]; }),
+    links: graph.links.map(function(l) {
+      return [graph.nodes.indexOf(l[0]), graph.nodes.indexOf(l[1])];
+    })
+  };
+}
+
+function logMove(move, alternatives, crossingsBefore) {
+  var crossingsAfter = intersections(graph.links);
+  
+  var entry = {
+    timestamp: new Date().toISOString(),
+    sessionId: sessionId,
+    moveNumber: moves,
+    crossingsBefore: crossingsBefore,
+    crossingsAfter: crossingsAfter,
+    move: {
+      strategy: move.strategy,
+      nodeIndex: move.nodeIndex,
+      from: [move.fromX, move.fromY],
+      to: [move.toX, move.toY],
+      improvement: move.improvement
+    },
+    alternatives: alternatives ? alternatives.map(function(alt) {
+      return {
+        strategy: alt.strategy,
+        nodeIndex: alt.nodeIndex,
+        improvement: alt.improvement
+      };
+    }) : [],
+    graphSnapshot: (moves % 10 === 0) ? snapshotGraph() : null
+  };
+  
+  moveHistory.push(entry);
+  
+  // Write to file if in Electron
+  if (typeof require !== 'undefined') {
+    try {
+      var fs = require('fs');
+      fs.appendFileSync('move-history.jsonl', JSON.stringify(entry) + '\n');
+    } catch (e) {}
+  }
+  
+  return entry;
+}
+
+function clearMoveHistory() {
+  moveHistory = [];
+  sessionId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  
+  // Clear file if in Electron
+  if (typeof require !== 'undefined') {
+    try {
+      var fs = require('fs');
+      fs.writeFileSync('move-history.jsonl', '');
+    } catch (e) {}
+  }
+}
+
+function exportMoveHistory() {
+  var data = {
+    sessionId: sessionId,
+    exportedAt: new Date().toISOString(),
+    nodeCount: graph.nodes.length,
+    edgeCount: graph.links.length,
+    totalMoves: moves,
+    finalCrossings: count,
+    moves: moveHistory,
+    finalGraph: snapshotGraph()
+  };
+  
+  if (typeof require !== 'undefined') {
+    try {
+      var fs = require('fs');
+      var filename = 'session-' + sessionId + '.json';
+      fs.writeFileSync(filename, JSON.stringify(data, null, 2));
+      showStatus('History exported to ' + filename, false);
+      return filename;
+    } catch (e) {
+      showStatus('Export failed: ' + e.message, true);
+    }
+  } else {
+    console.log('Move history:', data);
+    showStatus('History logged to console', false);
+  }
+  return null;
+}
+
 // Analytics tracking
 var analytics = {
   status: 'idle',
@@ -345,272 +465,9 @@ function updateAnalytics() {
 var currentStrategy = 'centroid'; // 'centroid', 'force', 'random'
 var selectedNode = null; // Currently selected node for operations
 
-// getNeighbors is imported from solver.js - use as getNeighbors(graph, node)
+// Strategies imported from solver.js: findCentroidMove, findLocalMove, findUncrossMove, findWiggleMove
 
-// Calculate centroid of a set of nodes
-function centroid(nodes) {
-  if (nodes.length === 0) return null;
-  var cx = 0, cy = 0;
-  nodes.forEach(function(n) {
-    cx += n[0];
-    cy += n[1];
-  });
-  return [cx / nodes.length, cy / nodes.length];
-}
-
-// Strategy 1: Move toward centroid of neighbors
-function findCentroidMove() {
-  var bestMove = null;
-  var bestScore = -Infinity;
-  
-  // Check each node involved in crossings
-  graph.nodes.forEach(function(node, i) {
-    if (!node.intersection) return;
-    
-    var neighbors = getNeighbors(graph, node);
-    if (neighbors.length === 0) return;
-    
-    var target = centroid(neighbors);
-    var originalCount = count;
-    var originalX = node[0];
-    var originalY = node[1];
-    
-    // Try moving toward centroid
-    var dx = target[0] - node[0];
-    var dy = target[1] - node[1];
-    var dist = Math.sqrt(dx * dx + dy * dy);
-    
-    if (dist < 0.01) return; // Already at centroid
-    
-    // Move partway toward centroid
-    var moveAmount = Math.min(0.1, dist * 0.5);
-    var newX = node[0] + (dx / dist) * moveAmount;
-    var newY = node[1] + (dy / dist) * moveAmount;
-    newX = Math.max(0.02, Math.min(0.98, newX));
-    newY = Math.max(0.02, Math.min(0.98, newY));
-    
-    // Test this position
-    node[0] = newX;
-    node[1] = newY;
-    var newCount = intersections(graph.links);
-    
-    // Score: prefer moves that reduce crossings, or at least move toward centroid
-    var improvement = originalCount - newCount;
-    var score = improvement * 10 + (1 - dist); // Prioritize improvements, tiebreak by distance
-    
-    if (improvement > 0 || (improvement === 0 && dist > 0.05)) {
-      if (score > bestScore) {
-        bestScore = score;
-        bestMove = {
-          node: node,
-          nodeIndex: i,
-          fromX: originalX,
-          fromY: originalY,
-          toX: newX,
-          toY: newY,
-          improvement: improvement,
-          strategy: 'centroid'
-        };
-      }
-    }
-    
-    // Restore
-    node[0] = originalX;
-    node[1] = originalY;
-  });
-  
-  intersections(graph.links); // Restore flags
-  return bestMove;
-}
-
-// Strategy 2: Local refinement - try small movements in all directions
-function findLocalMove() {
-  var bestMove = null;
-  var bestImprovement = 0;
-  
-  graph.nodes.forEach(function(node, i) {
-    if (!node.intersection) return;
-    
-    var originalX = node[0];
-    var originalY = node[1];
-    var originalCount = count;
-    
-    // Try 8 directions plus some random
-    var directions = [
-      [1, 0], [-1, 0], [0, 1], [0, -1],
-      [1, 1], [1, -1], [-1, 1], [-1, -1]
-    ];
-    
-    var stepSize = 0.03;
-    
-    directions.forEach(function(dir) {
-      var newX = originalX + dir[0] * stepSize;
-      var newY = originalY + dir[1] * stepSize;
-      newX = Math.max(0.02, Math.min(0.98, newX));
-      newY = Math.max(0.02, Math.min(0.98, newY));
-      
-      node[0] = newX;
-      node[1] = newY;
-      var newCount = intersections(graph.links);
-      var improvement = originalCount - newCount;
-      
-      if (improvement > bestImprovement) {
-        bestImprovement = improvement;
-        bestMove = {
-          node: node,
-          nodeIndex: i,
-          fromX: originalX,
-          fromY: originalY,
-          toX: newX,
-          toY: newY,
-          improvement: improvement,
-          strategy: 'local'
-        };
-      }
-      
-      node[0] = originalX;
-      node[1] = originalY;
-    });
-  });
-  
-  intersections(graph.links);
-  return bestMove;
-}
-
-// Strategy 3: Move away from crossing midpoints
-function findUncrossMove() {
-  var bestMove = null;
-  var bestImprovement = 0;
-  
-  graph.nodes.forEach(function(node, i) {
-    if (!node.intersection) return;
-    
-    var originalX = node[0];
-    var originalY = node[1];
-    var originalCount = count;
-    
-    // Find all crossing midpoints this node should avoid
-    var avoidX = 0, avoidY = 0, avoidCount = 0;
-    
-    graph.links.forEach(function(link) {
-      if ((link[0] === node || link[1] === node) && link.intersection) {
-        // Find what this edge crosses
-        graph.links.forEach(function(other) {
-          if (other !== link && intersect(link, other)) {
-            // Add midpoint of crossing edge to avoidance
-            avoidX += (other[0][0] + other[1][0]) / 2;
-            avoidY += (other[0][1] + other[1][1]) / 2;
-            avoidCount++;
-          }
-        });
-      }
-    });
-    
-    if (avoidCount === 0) return;
-    
-    avoidX /= avoidCount;
-    avoidY /= avoidCount;
-    
-    // Move away from the crossing area
-    var dx = node[0] - avoidX;
-    var dy = node[1] - avoidY;
-    var dist = Math.sqrt(dx * dx + dy * dy);
-    
-    if (dist < 0.001) {
-      dx = Math.random() - 0.5;
-      dy = Math.random() - 0.5;
-      dist = Math.sqrt(dx * dx + dy * dy);
-    }
-    
-    var moveAmount = 0.08;
-    var newX = node[0] + (dx / dist) * moveAmount;
-    var newY = node[1] + (dy / dist) * moveAmount;
-    newX = Math.max(0.02, Math.min(0.98, newX));
-    newY = Math.max(0.02, Math.min(0.98, newY));
-    
-    // Test
-    node[0] = newX;
-    node[1] = newY;
-    var newCount = intersections(graph.links);
-    var improvement = originalCount - newCount;
-    
-    if (improvement > bestImprovement) {
-      bestImprovement = improvement;
-      bestMove = {
-        node: node,
-        nodeIndex: i,
-        fromX: originalX,
-        fromY: originalY,
-        toX: newX,
-        toY: newY,
-        improvement: improvement,
-        strategy: 'uncross'
-      };
-    }
-    
-    // Restore
-    node[0] = originalX;
-    node[1] = originalY;
-  });
-  
-  intersections(graph.links);
-  return bestMove;
-}
-
-// Strategy 4: Wiggle - random perturbation to escape local minima
-function findWiggleMove() {
-  var bestMove = null;
-  var bestImprovement = -Infinity;
-  
-  // Try random moves on intersecting nodes
-  var candidates = graph.nodes.filter(function(n) { return n.intersection; });
-  if (candidates.length === 0) return null;
-  
-  // Pick a random intersecting node
-  var node = candidates[Math.floor(Math.random() * candidates.length)];
-  var i = graph.nodes.indexOf(node);
-  
-  var originalX = node[0];
-  var originalY = node[1];
-  var originalCount = count;
-  
-  // Try several random positions
-  for (var t = 0; t < 20; t++) {
-    var angle = Math.random() * Math.PI * 2;
-    var dist = 0.05 + Math.random() * 0.15;
-    var newX = originalX + Math.cos(angle) * dist;
-    var newY = originalY + Math.sin(angle) * dist;
-    newX = Math.max(0.02, Math.min(0.98, newX));
-    newY = Math.max(0.02, Math.min(0.98, newY));
-    
-    node[0] = newX;
-    node[1] = newY;
-    var newCount = intersections(graph.links);
-    var improvement = originalCount - newCount;
-    
-    if (improvement > bestImprovement) {
-      bestImprovement = improvement;
-      bestMove = {
-        node: node,
-        nodeIndex: i,
-        fromX: originalX,
-        fromY: originalY,
-        toX: newX,
-        toY: newY,
-        improvement: improvement,
-        strategy: 'wiggle'
-      };
-    }
-    
-    node[0] = originalX;
-    node[1] = originalY;
-  }
-  
-  intersections(graph.links);
-  return bestMove;
-}
-
-// Strategy 5: Repel - push all nodes away from a selected node
+// Strategy: Repel - push all nodes away from a selected node
 function doRepel(centerNode) {
   var centerX = centerNode[0];
   var centerY = centerNode[1];
@@ -682,6 +539,8 @@ function executeMove(move, callback) {
     return;
   }
   
+  var crossingsBefore = count;
+  
   analytics.status = move.strategy;
   analytics.nodeIndex = move.nodeIndex;
   analytics.nodeCrossings = nodeIntersectionCount(move.node);
@@ -696,6 +555,10 @@ function executeMove(move, callback) {
   animateNode(move.node, move.toX, move.toY, function() {
     moves++;
     moveCounter.text(moves + " move" + (moves !== 1 ? "s" : ""));
+    
+    // Log the move (no alternatives for single-strategy execution)
+    logMove(move, null, crossingsBefore);
+    
     analytics.status = 'idle';
     updateAnalytics();
     if (callback) callback(true);
@@ -710,7 +573,7 @@ function stepCentroid(callback) {
     return;
   }
   count = intersections(graph.links);
-  var move = findCentroidMove();
+  var move = findCentroidMove(graph);
   executeMove(move, callback);
 }
 
@@ -721,7 +584,7 @@ function stepUncross(callback) {
     return;
   }
   count = intersections(graph.links);
-  var move = findUncrossMove();
+  var move = findUncrossMove(graph);
   executeMove(move, callback);
 }
 
@@ -732,7 +595,7 @@ function stepLocal(callback) {
     return;
   }
   count = intersections(graph.links);
-  var move = findLocalMove();
+  var move = findLocalMove(graph);
   executeMove(move, callback);
 }
 
@@ -743,7 +606,7 @@ function stepWiggle(callback) {
     return;
   }
   count = intersections(graph.links);
-  var move = findWiggleMove();
+  var move = findWiggleMove(graph);
   executeMove(move, callback);
 }
 
@@ -765,13 +628,13 @@ function solverStepMulti(callback) {
   // Try strategies and pick best move
   var moves_found = [];
   
-  var centroidMove = findCentroidMove();
+  var centroidMove = findCentroidMove(graph);
   if (centroidMove) moves_found.push(centroidMove);
   
-  var uncrossMove = findUncrossMove();
+  var uncrossMove = findUncrossMove(graph);
   if (uncrossMove) moves_found.push(uncrossMove);
   
-  var localMove = findLocalMove();
+  var localMove = findLocalMove(graph);
   if (localMove) moves_found.push(localMove);
   
   // Pick the move with best improvement
@@ -799,10 +662,18 @@ function solverStepMulti(callback) {
   
   showStatus("Strategy: " + bestMove.strategy + " (node " + bestMove.nodeIndex + ", -" + bestMove.improvement + " crossings)", false);
   
+  // Capture crossings before move for logging
+  var crossingsBefore = count;
+  var alternatives = moves_found.filter(function(m) { return m !== bestMove; });
+  
   // Animate the move
   animateNode(bestMove.node, bestMove.toX, bestMove.toY, function() {
     moves++;
     moveCounter.text(moves + " move" + (moves !== 1 ? "s" : ""));
+    
+    // Log the move with alternatives
+    logMove(bestMove, alternatives, crossingsBefore);
+    
     analytics.status = 'idle';
     updateAnalytics();
     if (callback) callback(true);
@@ -865,207 +736,6 @@ function animateNode(node, targetX, targetY, callback) {
   }
   
   requestAnimationFrame(frame);
-}
-
-// Try to find the best move for a given node
-function findBestMoveForNode(node, nodeIndex) {
-  var originalX = node[0];
-  var originalY = node[1];
-  var originalCount = intersections(graph.links);
-  
-  var bestX = originalX;
-  var bestY = originalY;
-  var bestCount = originalCount;
-  var sampleCount = 0;
-  
-  // Try a grid of positions
-  var gridSize = 5;
-  for (var gx = 0; gx < gridSize; gx++) {
-    for (var gy = 0; gy < gridSize; gy++) {
-      node[0] = (gx + 0.5) / gridSize;
-      node[1] = (gy + 0.5) / gridSize;
-      sampleCount++;
-      var newCount = intersections(graph.links);
-      
-      if (newCount < bestCount) {
-        bestCount = newCount;
-        bestX = node[0];
-        bestY = node[1];
-      }
-    }
-  }
-  
-  // Sample random positions
-  var samples = 10;
-  for (var i = 0; i < samples; i++) {
-    node[0] = Math.random();
-    node[1] = Math.random();
-    sampleCount++;
-    var newCount = intersections(graph.links);
-    
-    if (newCount < bestCount) {
-      bestCount = newCount;
-      bestX = node[0];
-      bestY = node[1];
-    }
-  }
-  
-  // Try positions near other nodes
-  graph.nodes.forEach(function(other) {
-    if (other !== node) {
-      // Try exact position of other node
-      node[0] = other[0] + (Math.random() - 0.5) * 0.05;
-      node[1] = other[1] + (Math.random() - 0.5) * 0.05;
-      node[0] = Math.max(0.01, Math.min(0.99, node[0]));
-      node[1] = Math.max(0.01, Math.min(0.99, node[1]));
-      sampleCount++;
-      
-      var newCount = intersections(graph.links);
-      if (newCount < bestCount) {
-        bestCount = newCount;
-        bestX = node[0];
-        bestY = node[1];
-      }
-    }
-  });
-  
-  // Restore original position
-  node[0] = originalX;
-  node[1] = originalY;
-  intersections(graph.links);
-  
-  if (bestCount < originalCount) {
-    return { 
-      node: node, 
-      nodeIndex: nodeIndex,
-      x: bestX, 
-      y: bestY, 
-      fromX: originalX,
-      fromY: originalY,
-      improvement: originalCount - bestCount,
-      samples: sampleCount
-    };
-  }
-  return null;
-}
-
-// Try to improve position of a single node
-function solverStep(callback) {
-  // Check if graph exists
-  if (!graph.nodes || graph.nodes.length === 0) {
-    showStatus("No graph - click New Graph first", true);
-    if (callback) callback(false);
-    return;
-  }
-  
-  // Refresh intersection flags and count
-  count = intersections(graph.links);
-  
-  analytics.crossings = count;
-  analytics.status = 'searching';
-  updateAnalytics();
-  
-  if (count === 0) {
-    analytics.status = 'solved';
-    updateAnalytics();
-    showStatus("Already solved!", false);
-    stopSolver();
-    if (callback) callback(false);
-    return;
-  }
-  
-  var candidates = getNodesByIntersections();
-  analytics.candidatesTried = candidates.length;
-  updateAnalytics();
-  
-  if (candidates.length === 0) {
-    analytics.status = 'stuck';
-    updateAnalytics();
-    showStatus("No nodes with intersections (count=" + count + ")", true);
-    stopSolver();
-    if (callback) callback(false);
-    return;
-  }
-  
-  // Try each candidate node, take the best improvement
-  var bestMove = null;
-  var totalSamples = 0;
-  var candidatesTried = Math.min(candidates.length, 5);
-  var movesFound = 0;
-  
-  for (var i = 0; i < candidatesTried; i++) {
-    var nodeIndex = graph.nodes.indexOf(candidates[i].node);
-    var move = findBestMoveForNode(candidates[i].node, nodeIndex);
-    if (move) {
-      totalSamples += move.samples;
-      movesFound++;
-      if (!bestMove || move.improvement > bestMove.improvement) {
-        bestMove = move;
-      }
-    } else {
-      totalSamples += 84 + graph.nodes.length; // approx samples tried
-    }
-  }
-  
-  analytics.candidatesTried = candidatesTried + " (" + movesFound + " improved)";
-  analytics.samplesTested = totalSamples;
-  
-  if (bestMove) {
-    analytics.status = 'moving';
-    analytics.nodeIndex = bestMove.nodeIndex;
-    analytics.nodeCrossings = nodeIntersectionCount(bestMove.node);
-    analytics.improvement = bestMove.improvement;
-    analytics.fromPos = [bestMove.fromX, bestMove.fromY];
-    analytics.toPos = [bestMove.x, bestMove.y];
-    updateAnalytics();
-    
-    showStatus("Moving node " + bestMove.nodeIndex + " (improvement: -" + bestMove.improvement + ")", false);
-    
-    update();
-    animateNode(bestMove.node, bestMove.x, bestMove.y, function() {
-      moves++;
-      moveCounter.text(moves + " move" + (moves !== 1 ? "s" : ""));
-      analytics.status = 'idle';
-      analytics.crossings = count;
-      updateAnalytics();
-      if (callback) callback(true);
-    });
-  } else {
-    analytics.status = 'stuck';
-    updateAnalytics();
-    update();
-    showStatus("No improvement found (" + candidatesTried + " nodes, " + totalSamples + " positions tried)", true);
-    if (callback) callback(false);
-  }
-}
-
-// Run solver continuously
-function runSolver() {
-  if (solverRunning) return;
-  solverRunning = true;
-  
-  function step() {
-    if (!solverRunning) return;
-    
-    solverStep(function(improved) {
-      if (!solverRunning) return;
-      
-      if (improved && count > 0) {
-        var speed = +d3.select("#solver-speed").property("value");
-        var delay = Math.max(5, 200 - speed * 2);
-        solverTimeout = setTimeout(step, delay);
-      } else {
-        stopSolver();
-        if (count === 0) {
-          showStatus("Solved!", false);
-        } else {
-          showStatus("Stuck at " + count + " crossings", true);
-        }
-      }
-    });
-  }
-  
-  step();
 }
 
 // Stop solver
@@ -1226,6 +896,15 @@ d3.select("#dump-state").on("click", function() {
   }
 });
 
+// Export move history button
+d3.select("#export-history").on("click", function() {
+  if (moveHistory.length === 0) {
+    showStatus("No moves to export", true);
+    return;
+  }
+  exportMoveHistory();
+});
+
 // ============ BENCHMARK SYSTEM ============
 
 // Non-animated solver step - returns true if improvement made
@@ -1236,13 +915,13 @@ function solverStepInstant() {
   // Try all strategies and pick best
   var moves_found = [];
   
-  var centroidMove = findCentroidMove();
+  var centroidMove = findCentroidMove(graph);
   if (centroidMove) moves_found.push(centroidMove);
   
-  var uncrossMove = findUncrossMove();
+  var uncrossMove = findUncrossMove(graph);
   if (uncrossMove) moves_found.push(uncrossMove);
   
-  var localMove = findLocalMove();
+  var localMove = findLocalMove(graph);
   if (localMove) moves_found.push(localMove);
   
   // Pick best improvement
@@ -1255,7 +934,7 @@ function solverStepInstant() {
   
   if (!bestMove || bestMove.improvement <= 0) {
     // Try wiggle as last resort
-    var wiggleMove = findWiggleMove();
+    var wiggleMove = findWiggleMove(graph);
     if (wiggleMove && wiggleMove.improvement > 0) {
       bestMove = wiggleMove;
     }
@@ -1309,7 +988,7 @@ function solveInstant(maxMoves) {
         };
       }
       // Random wiggle to try to escape
-      var wiggle = findWiggleMove();
+      var wiggle = findWiggleMove(graph);
       if (wiggle) {
         wiggle.node[0] = wiggle.toX;
         wiggle.node[1] = wiggle.toY;
@@ -1499,7 +1178,7 @@ function runBenchmarkWithViz(numPuzzles, nodeCount) {
         }
       } else {
         stuckCount++;
-        var wiggle = findWiggleMove();
+        var wiggle = findWiggleMove(graph);
         if (wiggle) {
           wiggle.node[0] = wiggle.toX;
           wiggle.node[1] = wiggle.toY;

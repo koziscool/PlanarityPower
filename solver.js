@@ -93,6 +93,238 @@
     return false;
   }
   
+  // ============ INCREMENTAL CROSSING DETECTION ============
+  // Instead of O(E²) full recount, compute delta for a single node move: O(degree × E)
+  
+  // Get edges connected to a node
+  function getNodeEdges(graph, node) {
+    var edges = [];
+    for (var i = 0; i < graph.links.length; i++) {
+      var link = graph.links[i];
+      if (link[0] === node || link[1] === node) {
+        edges.push(link);
+      }
+    }
+    return edges;
+  }
+  
+  // Count crossings involving a set of edges (against all other edges)
+  function countEdgeCrossings(graph, edges) {
+    var crossingCount = 0;
+    var edgeSet = new Set(edges);
+    
+    for (var i = 0; i < edges.length; i++) {
+      var edge = edges[i];
+      for (var j = 0; j < graph.links.length; j++) {
+        var other = graph.links[j];
+        if (edgeSet.has(other)) continue; // Don't double-count edges in our set
+        if (intersect(edge, other)) {
+          crossingCount++;
+        }
+      }
+    }
+    
+    // Also count crossings between edges in the set
+    for (var i = 0; i < edges.length; i++) {
+      for (var j = i + 1; j < edges.length; j++) {
+        if (intersect(edges[i], edges[j])) {
+          crossingCount++;
+        }
+      }
+    }
+    
+    return crossingCount;
+  }
+  
+  // Evaluate a node move incrementally - returns crossing delta (negative = improvement)
+  // Much faster than full intersections() call: O(degree × E) vs O(E²)
+  function evaluateMoveDelta(graph, node, newX, newY, baseCount) {
+    var edges = getNodeEdges(graph, node);
+    if (edges.length === 0) return 0;
+    
+    // Count crossings before move
+    var crossingsBefore = countEdgeCrossings(graph, edges);
+    
+    // Temporarily move node
+    var oldX = node[0], oldY = node[1];
+    node[0] = newX;
+    node[1] = newY;
+    
+    // Count crossings after move
+    var crossingsAfter = countEdgeCrossings(graph, edges);
+    
+    // Restore
+    node[0] = oldX;
+    node[1] = oldY;
+    
+    return crossingsAfter - crossingsBefore; // negative = improvement
+  }
+  
+  // Fast version of findBestMove using incremental evaluation
+  function findBestMoveFast(graph, samplesPerNode) {
+    samplesPerNode = samplesPerNode || 30;
+    var count = intersections(graph.links);
+    if (count === 0) return null;
+    
+    var bestMove = null;
+    var bestImprovement = 0;
+    
+    // Only check nodes involved in crossings
+    var candidates = graph.nodes.filter(function(n) { return n.intersection; });
+    
+    candidates.forEach(function(node) {
+      var i = graph.nodes.indexOf(node);
+      var origX = node[0], origY = node[1];
+      
+      // Sample random positions
+      for (var s = 0; s < samplesPerNode; s++) {
+        var newX = 0.02 + Math.random() * 0.96;
+        var newY = 0.02 + Math.random() * 0.96;
+        
+        if (isTooClose(graph, node, newX, newY)) continue;
+        
+        var delta = evaluateMoveDelta(graph, node, newX, newY, count);
+        var improvement = -delta; // delta is negative when improving
+        
+        if (improvement > bestImprovement) {
+          bestImprovement = improvement;
+          bestMove = {
+            node: node,
+            nodeIndex: i,
+            fromX: origX,
+            fromY: origY,
+            toX: newX,
+            toY: newY,
+            improvement: improvement,
+            strategy: 'random-fast'
+          };
+        }
+      }
+      
+      // Also try neighbor centroid
+      var neighbors = getNeighbors(graph, node);
+      if (neighbors.length > 0) {
+        var cx = 0, cy = 0;
+        neighbors.forEach(function(n) { cx += n[0]; cy += n[1]; });
+        cx /= neighbors.length;
+        cy /= neighbors.length;
+        cx = Math.max(0.02, Math.min(0.98, cx));
+        cy = Math.max(0.02, Math.min(0.98, cy));
+        
+        if (!isTooClose(graph, node, cx, cy)) {
+          var delta = evaluateMoveDelta(graph, node, cx, cy, count);
+          var improvement = -delta;
+          
+          if (improvement > bestImprovement) {
+            bestImprovement = improvement;
+            bestMove = {
+              node: node,
+              nodeIndex: i,
+              fromX: origX,
+              fromY: origY,
+              toX: cx,
+              toY: cy,
+              improvement: improvement,
+              strategy: 'centroid-fast'
+            };
+          }
+        }
+      }
+    });
+    
+    return bestMove;
+  }
+  
+  // Fast bottleneck move finder
+  function findBottleneckMoveFast(graph, samplesPerNode) {
+    samplesPerNode = samplesPerNode || 20;
+    var count = intersections(graph.links);
+    if (count === 0) return null;
+    
+    var crossingCounts = getCrossingCounts(graph);
+    
+    // Score each intersecting vertex
+    var scored = [];
+    for (var i = 0; i < graph.nodes.length; i++) {
+      var node = graph.nodes[i];
+      if (!node.intersection) continue;
+      var neighbors = getNeighbors(graph, node);
+      var cc = crossingCounts[i];
+      var score = cc / (neighbors.length + 1);
+      scored.push({ node: node, index: i, crossingCount: cc, score: score });
+    }
+    
+    scored.sort(function(a, b) { return b.score - a.score; });
+    
+    var bestMove = null;
+    var bestImprovement = 0;
+    var numToCheck = Math.min(10, scored.length);
+    
+    for (var si = 0; si < numToCheck; si++) {
+      var item = scored[si];
+      var node = item.node;
+      var idx = item.index;
+      var origX = node[0], origY = node[1];
+      var neighbors = getNeighbors(graph, node);
+      
+      // Try neighbor centroid first (usually best for bottlenecks)
+      if (neighbors.length > 0) {
+        var cx = 0, cy = 0;
+        neighbors.forEach(function(n) { cx += n[0]; cy += n[1]; });
+        cx /= neighbors.length;
+        cy /= neighbors.length;
+        cx = Math.max(0.02, Math.min(0.98, cx));
+        cy = Math.max(0.02, Math.min(0.98, cy));
+        
+        if (!isTooClose(graph, node, cx, cy)) {
+          var delta = evaluateMoveDelta(graph, node, cx, cy, count);
+          var improvement = -delta;
+          
+          if (improvement > bestImprovement) {
+            bestImprovement = improvement;
+            bestMove = {
+              node: node,
+              nodeIndex: idx,
+              fromX: origX,
+              fromY: origY,
+              toX: cx,
+              toY: cy,
+              improvement: improvement,
+              strategy: 'bottleneck-centroid-fast'
+            };
+          }
+        }
+      }
+      
+      // Sample random positions
+      for (var s = 0; s < samplesPerNode; s++) {
+        var newX = 0.15 + Math.random() * 0.7;
+        var newY = 0.15 + Math.random() * 0.7;
+        
+        if (isTooClose(graph, node, newX, newY)) continue;
+        
+        var delta = evaluateMoveDelta(graph, node, newX, newY, count);
+        var improvement = -delta;
+        
+        if (improvement > bestImprovement) {
+          bestImprovement = improvement;
+          bestMove = {
+            node: node,
+            nodeIndex: idx,
+            fromX: origX,
+            fromY: origY,
+            toX: newX,
+            toY: newY,
+            improvement: improvement,
+            strategy: 'bottleneck-sample-fast'
+          };
+        }
+      }
+    }
+    
+    return bestMove;
+  }
+  
   // ============ CROSSING COUNT PER VERTEX ============
   
   function getCrossingCounts(graph) {
@@ -428,37 +660,34 @@
     
     var best = null;
     
-    // Early game (many crossings): prioritize bottleneck moves
+    // Early game (many crossings): use fast incremental evaluation
     if (count > 50) {
-      best = findBottleneckMove(graph, 25);
+      best = findBottleneckMoveFast(graph, 25);
       if (!best || best.improvement <= 0) {
-        best = findGrowClumpMove(graph);
-      }
-      if (!best || best.improvement <= 0) {
-        best = findBestMove(graph, 20);
+        best = findBestMoveFast(graph, 30);
       }
     }
-    // Mid game: balance bottleneck and clump growing
+    // Mid game: balance strategies
     else if (count > 15) {
-      best = findGrowClumpMove(graph);
+      best = findBottleneckMoveFast(graph, 20);
       if (!best || best.improvement <= 0) {
-        best = findBottleneckMove(graph, 20);
+        best = findBestMoveFast(graph, 25);
       }
       if (!best || best.improvement <= 0) {
-        best = findBestMove(graph, 20);
+        best = findGrowClumpMove(graph); // clump growing for mid-game
       }
     }
-    // Late game: grid search becomes viable
+    // Late game: grid search becomes viable, can afford O(n²) calls
     else {
       best = findGridMove(graph);
       if (!best || best.improvement <= 0) {
         best = findGrowClumpMove(graph);
       }
       if (!best || best.improvement <= 0) {
-        best = findBottleneckMove(graph, 15);
+        best = findBottleneckMoveFast(graph, 15);
       }
       if (!best || best.improvement <= 0) {
-        best = findBestMove(graph, 30);
+        best = findBestMoveFast(graph, 30);
       }
     }
     
@@ -766,6 +995,246 @@
     return bestMove;
   }
   
+  // ============ INTERACTIVE STRATEGIES ============
+  // Moved from planarity.js - simpler strategies for interactive mode
+  
+  // Helper: calculate centroid of a set of nodes
+  function centroid(nodes) {
+    if (nodes.length === 0) return null;
+    var cx = 0, cy = 0;
+    for (var i = 0; i < nodes.length; i++) {
+      cx += nodes[i][0];
+      cy += nodes[i][1];
+    }
+    return [cx / nodes.length, cy / nodes.length];
+  }
+  
+  // Strategy: Move toward centroid of neighbors
+  function findCentroidMove(graph) {
+    var count = intersections(graph.links);
+    if (count === 0) return null;
+    
+    var bestMove = null;
+    var bestScore = -Infinity;
+    
+    for (var i = 0; i < graph.nodes.length; i++) {
+      var node = graph.nodes[i];
+      if (!node.intersection) continue;
+      
+      var neighbors = getNeighbors(graph, node);
+      if (neighbors.length === 0) continue;
+      
+      var target = centroid(neighbors);
+      var originalX = node[0];
+      var originalY = node[1];
+      
+      var dx = target[0] - node[0];
+      var dy = target[1] - node[1];
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist < 0.01) continue;
+      
+      var moveAmount = Math.min(0.1, dist * 0.5);
+      var newX = node[0] + (dx / dist) * moveAmount;
+      var newY = node[1] + (dy / dist) * moveAmount;
+      newX = Math.max(0.02, Math.min(0.98, newX));
+      newY = Math.max(0.02, Math.min(0.98, newY));
+      
+      // Use fast incremental evaluation
+      var delta = evaluateMoveDelta(graph, node, newX, newY, count);
+      var improvement = -delta;
+      var score = improvement * 10 + (1 - dist);
+      
+      if (improvement > 0 || (improvement === 0 && dist > 0.05)) {
+        if (score > bestScore) {
+          bestScore = score;
+          bestMove = {
+            node: node,
+            nodeIndex: i,
+            fromX: originalX,
+            fromY: originalY,
+            toX: newX,
+            toY: newY,
+            improvement: improvement,
+            strategy: 'centroid'
+          };
+        }
+      }
+    }
+    
+    return bestMove;
+  }
+  
+  // Strategy: Local refinement - try small movements in 8 directions
+  function findLocalMove(graph) {
+    var count = intersections(graph.links);
+    if (count === 0) return null;
+    
+    var bestMove = null;
+    var bestImprovement = 0;
+    
+    var directions = [
+      [1, 0], [-1, 0], [0, 1], [0, -1],
+      [1, 1], [1, -1], [-1, 1], [-1, -1]
+    ];
+    var stepSize = 0.03;
+    
+    for (var i = 0; i < graph.nodes.length; i++) {
+      var node = graph.nodes[i];
+      if (!node.intersection) continue;
+      
+      var originalX = node[0];
+      var originalY = node[1];
+      
+      for (var d = 0; d < directions.length; d++) {
+        var dir = directions[d];
+        var newX = originalX + dir[0] * stepSize;
+        var newY = originalY + dir[1] * stepSize;
+        newX = Math.max(0.02, Math.min(0.98, newX));
+        newY = Math.max(0.02, Math.min(0.98, newY));
+        
+        var delta = evaluateMoveDelta(graph, node, newX, newY, count);
+        var improvement = -delta;
+        
+        if (improvement > bestImprovement) {
+          bestImprovement = improvement;
+          bestMove = {
+            node: node,
+            nodeIndex: i,
+            fromX: originalX,
+            fromY: originalY,
+            toX: newX,
+            toY: newY,
+            improvement: improvement,
+            strategy: 'local'
+          };
+        }
+      }
+    }
+    
+    return bestMove;
+  }
+  
+  // Strategy: Move away from crossing midpoints
+  function findUncrossMove(graph) {
+    var count = intersections(graph.links);
+    if (count === 0) return null;
+    
+    var bestMove = null;
+    var bestImprovement = 0;
+    
+    for (var i = 0; i < graph.nodes.length; i++) {
+      var node = graph.nodes[i];
+      if (!node.intersection) continue;
+      
+      var originalX = node[0];
+      var originalY = node[1];
+      
+      // Find crossing midpoints to avoid
+      var avoidX = 0, avoidY = 0, avoidCount = 0;
+      
+      for (var li = 0; li < graph.links.length; li++) {
+        var link = graph.links[li];
+        if ((link[0] === node || link[1] === node) && link.intersection) {
+          for (var oj = 0; oj < graph.links.length; oj++) {
+            var other = graph.links[oj];
+            if (other !== link && intersect(link, other)) {
+              avoidX += (other[0][0] + other[1][0]) / 2;
+              avoidY += (other[0][1] + other[1][1]) / 2;
+              avoidCount++;
+            }
+          }
+        }
+      }
+      
+      if (avoidCount === 0) continue;
+      
+      avoidX /= avoidCount;
+      avoidY /= avoidCount;
+      
+      var dx = node[0] - avoidX;
+      var dy = node[1] - avoidY;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist < 0.001) {
+        dx = Math.random() - 0.5;
+        dy = Math.random() - 0.5;
+        dist = Math.sqrt(dx * dx + dy * dy);
+      }
+      
+      var moveAmount = 0.08;
+      var newX = node[0] + (dx / dist) * moveAmount;
+      var newY = node[1] + (dy / dist) * moveAmount;
+      newX = Math.max(0.02, Math.min(0.98, newX));
+      newY = Math.max(0.02, Math.min(0.98, newY));
+      
+      var delta = evaluateMoveDelta(graph, node, newX, newY, count);
+      var improvement = -delta;
+      
+      if (improvement > bestImprovement) {
+        bestImprovement = improvement;
+        bestMove = {
+          node: node,
+          nodeIndex: i,
+          fromX: originalX,
+          fromY: originalY,
+          toX: newX,
+          toY: newY,
+          improvement: improvement,
+          strategy: 'uncross'
+        };
+      }
+    }
+    
+    return bestMove;
+  }
+  
+  // Strategy: Wiggle - random perturbation to escape local minima
+  function findWiggleMove(graph) {
+    var count = intersections(graph.links);
+    if (count === 0) return null;
+    
+    var candidates = graph.nodes.filter(function(n) { return n.intersection; });
+    if (candidates.length === 0) return null;
+    
+    var node = candidates[Math.floor(Math.random() * candidates.length)];
+    var i = graph.nodes.indexOf(node);
+    
+    var originalX = node[0];
+    var originalY = node[1];
+    
+    var bestMove = null;
+    var bestImprovement = -Infinity;
+    
+    for (var t = 0; t < 20; t++) {
+      var angle = Math.random() * Math.PI * 2;
+      var dist = 0.05 + Math.random() * 0.15;
+      var newX = originalX + Math.cos(angle) * dist;
+      var newY = originalY + Math.sin(angle) * dist;
+      newX = Math.max(0.02, Math.min(0.98, newX));
+      newY = Math.max(0.02, Math.min(0.98, newY));
+      
+      var delta = evaluateMoveDelta(graph, node, newX, newY, count);
+      var improvement = -delta;
+      
+      if (improvement > bestImprovement) {
+        bestImprovement = improvement;
+        bestMove = {
+          node: node,
+          nodeIndex: i,
+          fromX: originalX,
+          fromY: originalY,
+          toX: newX,
+          toY: newY,
+          improvement: improvement,
+          strategy: 'wiggle'
+        };
+      }
+    }
+    
+    return bestMove;
+  }
+  
   // ============ EXPORTS ============
   
   exports.cross = cross;
@@ -775,7 +1244,9 @@
   exports.scramble = scramble;
   exports.getNeighbors = getNeighbors;
   exports.findBestMove = findBestMove;
+  exports.findBestMoveFast = findBestMoveFast;
   exports.findBottleneckMove = findBottleneckMove;
+  exports.findBottleneckMoveFast = findBottleneckMoveFast;
   exports.getCrossingCounts = getCrossingCounts;
   exports.findGridMove = findGridMove;
   exports.findEscapeMove = findEscapeMove;
@@ -784,5 +1255,12 @@
   exports.findClumps = findClumps;
   exports.solverStep = solverStep;
   exports.solvePuzzle = solvePuzzle;
+  exports.evaluateMoveDelta = evaluateMoveDelta;
+  exports.getNodeEdges = getNodeEdges;
+  exports.findCentroidMove = findCentroidMove;
+  exports.findLocalMove = findLocalMove;
+  exports.findUncrossMove = findUncrossMove;
+  exports.findWiggleMove = findWiggleMove;
+  exports.centroid = centroid;
   
 })(typeof module !== 'undefined' && module.exports ? module.exports : (window.Solver = {}));

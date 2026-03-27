@@ -60,7 +60,7 @@
 </head>
 <body>
   <div class="controls">
-    <label>Nodes: <input type="number" id="num-nodes" value="30" min="10" max="60" style="width:50px"></label>
+    <label>Nodes: <input type="number" id="num-nodes" value="30" min="10" max="100" style="width:50px"></label>
     <label>Speed: <input type="range" id="speed" min="1" max="100" value="70" style="width:100px"></label>
     <button id="start-btn">Start</button>
     <button id="add-btn">+6 More</button>
@@ -80,11 +80,7 @@
     var intersections = Solver.intersections;
     var planarGraph = Solver.planarGraph;
     var scramble = Solver.scramble;
-    var findBestMove = Solver.findBestMove;
-    var findBottleneckMove = Solver.findBottleneckMove;
-    var findGridMove = Solver.findGridMove;
-    var findGrowClumpMove = Solver.findGrowClumpMove;
-    var findEscapeMove = Solver.findEscapeMove;
+    var solverStepCore = Solver.solverStep;
     
     var puzzles = [];
     var running = false;
@@ -136,80 +132,52 @@
         if (!puzzle.counted) { 
           stats.solved++; 
           puzzle.counted = true;
-          addPuzzleBatch(1); // Add a new puzzle immediately
+          addPuzzleBatch(1);
         }
         callback(false);
         return;
       }
       
-      // Stage-aware strategy selection
-      var move = null;
+      // Use shared solver step from solver.js
+      puzzle.solverState = puzzle.solverState || {};
+      var result = solverStepCore(graph, puzzle.solverState);
       
-      // Early game (many crossings): prioritize bottleneck moves
-      if (puzzle.count > 50) {
-        move = findBottleneckMove(graph, 25);
-        if (!move || move.improvement <= 0) {
-          move = findGrowClumpMove(graph);
+      if (result.done) {
+        puzzle.status = 'solved';
+        puzzle.count = 0;
+        if (!puzzle.counted) { 
+          stats.solved++; 
+          puzzle.counted = true;
+          addPuzzleBatch(1);
         }
-        if (!move || move.improvement <= 0) {
-          move = findBestMove(graph, 20);
-        }
-      }
-      // Mid game: balance bottleneck and clump growing
-      else if (puzzle.count > 15) {
-        move = findGrowClumpMove(graph);
-        if (!move || move.improvement <= 0) {
-          move = findBottleneckMove(graph, 20);
-        }
-        if (!move || move.improvement <= 0) {
-          move = findBestMove(graph, 20);
-        }
-      }
-      // Late game: grid search becomes viable
-      else {
-        move = findGridMove(graph);
-        if (!move || move.improvement <= 0) {
-          move = findGrowClumpMove(graph);
-        }
-        if (!move || move.improvement <= 0) {
-          move = findBottleneckMove(graph, 15);
-        }
-        if (!move || move.improvement <= 0) {
-          move = findBestMove(graph, 30);
-        }
+        renderPuzzle(puzzle);
+        callback(false);
+        return;
       }
       
-      if (move && move.improvement > 0) {
-        move.node[0] = move.toX;
-        move.node[1] = move.toY;
+      if (result.stuck) {
+        puzzle.status = 'stuck';
+        if (!puzzle.counted) { 
+          stats.stuck++; 
+          puzzle.counted = true;
+          addPuzzleBatch(1);
+        }
+        renderPuzzle(puzzle);
+        callback(false);
+        return;
+      }
+      
+      if (result.move) {
         puzzle.moves++;
-        puzzle.lastStrategy = move.strategy;
-        puzzle.stuckCount = 0;
+        puzzle.lastStrategy = result.move.strategy;
+        puzzle.count = result.count;
         stats.totalMoves++;
         renderPuzzle(puzzle);
+        // Keep running as long as we made a move (escape moves may not "improve" but should continue)
         callback(true);
       } else {
-        puzzle.stuckCount = (puzzle.stuckCount || 0) + 1;
-        if (puzzle.stuckCount > 30) {
-          puzzle.status = 'stuck';
-          if (!puzzle.counted) { 
-            stats.stuck++; 
-            puzzle.counted = true;
-            addPuzzleBatch(1); // Add a new puzzle immediately
-          }
-          callback(false);
-          return;
-        }
-        var escape = findEscapeMove(graph);
-        if (escape) {
-          escape.node[0] = escape.toX;
-          escape.node[1] = escape.toY;
-          puzzle.moves++;
-          puzzle.lastStrategy = 'escape';
-          stats.totalMoves++;
-        }
         renderPuzzle(puzzle);
-        callback(true);
+        callback(false);
       }
     }
     

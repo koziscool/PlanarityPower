@@ -115,6 +115,7 @@
       <div class="section-label">Solver</div>
       <button id="btn-step">Step</button>
       <button id="btn-run">Run</button>
+      <button id="btn-compact">Compact</button>
       
       <div class="section-label">History</div>
       <div class="history-row">
@@ -157,6 +158,8 @@
     var solverStepCore = Solver.solverStep;
     var findClumps = Solver.findClumps;
     var findEscapeMove = Solver.findEscapeMove;
+    var findCompactMove = Solver.findCompactMove;
+    var findRelocateMove = Solver.findRelocateMove;
     
     // ============ HISTORY MANAGEMENT ============
     
@@ -759,8 +762,10 @@
       puzzle.status = 'running';
       
       // Log the move for analysis
-      var crossingsBefore = puzzle.history[puzzle.historyIndex].crossings;
-      var crossingsAfter = puzzle.count;
+      var crossingsBefore = (puzzle.history && puzzle.history[puzzle.historyIndex]) 
+        ? puzzle.history[puzzle.historyIndex].crossings 
+        : puzzle.count;
+      var crossingsAfter = intersections(puzzle.graph.links);
       var improvement = crossingsBefore - crossingsAfter;
       
       console.log('Move #' + puzzle.moves + ': node ' + dragState.nodeIndex + 
@@ -969,6 +974,36 @@
     // Run/Pause button
     document.getElementById('btn-run').addEventListener('click', start);
     
+    // Compact button - run compact/relocate moves until no more found
+    document.getElementById('btn-compact').addEventListener('click', function() {
+      if (puzzles.length === 0) return;
+      var puzzle = puzzles[0];
+      var graph = puzzle.graph;
+      var movesApplied = 0;
+      var maxMoves = 50;  // limit to prevent infinite loops
+      
+      while (movesApplied < maxMoves) {
+        var move = findCompactMove(graph);
+        if (!move) {
+          move = findRelocateMove(graph);
+        }
+        if (!move) break;
+        
+        move.node[0] = move.toX;
+        move.node[1] = move.toY;
+        puzzle.moves++;
+        puzzle.lastStrategy = move.strategy;
+        movesApplied++;
+        
+        intersections(graph.links);
+        saveState(puzzle);
+      }
+      
+      renderPuzzle(puzzle);
+      updateStatus();
+      console.log('Compact: applied ' + movesApplied + ' moves');
+    });
+    
     // History buttons
     document.getElementById('btn-back').addEventListener('click', function() {
       if (puzzles.length > 0) goBack(puzzles[0]);
@@ -1153,6 +1188,45 @@
             saveStateToFile(puzzle);
           }
         }
+      });
+      
+      // Listen for load-graph to import graphs from dashboard dump
+      ipcRenderer.on('load-graph', function(event, graphData) {
+        console.log('Loading graph via IPC:', graphData.nodes.length, 'nodes,', graphData.edges.length, 'edges');
+        
+        // Reconstruct nodes as arrays with coordinates
+        var newNodes = graphData.nodes.map(function(n) {
+          return [n[0], n[1]];
+        });
+        
+        // Reconstruct links as references to node objects
+        var newLinks = graphData.edges.map(function(e) {
+          return [newNodes[e[0]], newNodes[e[1]]];
+        });
+        
+        var newGraph = { nodes: newNodes, links: newLinks };
+        
+        // If no puzzles exist, create the UI first
+        if (puzzles.length === 0) {
+          createPuzzles();
+        }
+        
+        // Replace the first puzzle's graph
+        var puzzle = puzzles[0];
+        puzzle.graph = newGraph;
+        puzzle.history = [];
+        puzzle.moves = 0;
+        puzzle.status = 'running';
+        puzzle.movingNodeIndex = -1;
+        puzzle.solverState = {};
+        puzzle.initialCrossings = intersections(newGraph.links);
+        
+        selectedNodeIndex = -1;
+        renderPuzzle(puzzle);
+        updateStatus();
+        saveStateToFile(puzzle);
+        
+        console.log('Graph loaded:', newGraph.nodes.length, 'nodes,', newGraph.links.length, 'edges,', puzzle.initialCrossings, 'crossings');
       });
     }
     

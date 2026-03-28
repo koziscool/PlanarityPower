@@ -73,8 +73,12 @@
   <script>
     // Import solver
     var Solver = window.Solver;
-    if (typeof require !== 'undefined' && !Solver) {
-      try { Solver = require('./solver.js'); } catch(e) {}
+    var fs = null;
+    if (typeof require !== 'undefined') {
+      if (!Solver) {
+        try { Solver = require('./solver.js'); } catch(e) {}
+      }
+      try { fs = require('fs'); } catch(e) {}
     }
     
     var intersections = Solver.intersections;
@@ -85,6 +89,63 @@
     var puzzles = [];
     var running = false;
     var stats = { solved: 0, stuck: 0, totalMoves: 0 };
+    
+    // Log solved puzzle summary
+    function logSolvedPuzzle(puzzle) {
+      if (!fs) return;
+      
+      var strats = {};
+      puzzle.history.forEach(function(h) {
+        strats[h.src] = (strats[h.src] || 0) + 1;
+      });
+      
+      var entry = {
+        id: puzzle.id,
+        status: 'solved',
+        timestamp: new Date().toISOString(),
+        initialCrossings: puzzle.initialCrossings,
+        moves: puzzle.moves,
+        strategies: strats
+      };
+      
+      try {
+        fs.appendFileSync('dashboard-results.jsonl', JSON.stringify(entry) + '\n');
+      } catch(e) {}
+    }
+    
+    // Log stuck puzzles to file for analysis
+    function logStuckPuzzle(puzzle) {
+      if (!fs) return;
+      
+      var strats = {};
+      puzzle.history.forEach(function(h) {
+        strats[h.src] = (strats[h.src] || 0) + 1;
+      });
+      
+      var entry = {
+        id: puzzle.id,
+        timestamp: new Date().toISOString(),
+        initialCrossings: puzzle.initialCrossings,
+        finalCrossings: puzzle.count,
+        moves: puzzle.moves,
+        strategies: strats,
+        lastMoves: puzzle.history.slice(-30),
+        // Save graph state for potential export to interactive
+        graph: {
+          nodes: puzzle.graph.nodes.map(function(n) { return [n[0], n[1]]; }),
+          edges: puzzle.graph.links.map(function(l) {
+            return [puzzle.graph.nodes.indexOf(l[0]), puzzle.graph.nodes.indexOf(l[1])];
+          })
+        }
+      };
+      
+      try {
+        fs.appendFileSync('dashboard-stuck.jsonl', JSON.stringify(entry) + '\n');
+        console.log('Logged stuck puzzle #' + puzzle.id + ' to dashboard-stuck.jsonl');
+      } catch(e) {
+        console.error('Failed to log stuck puzzle:', e);
+      }
+    }
     
     function renderPuzzle(puzzle) {
       var svg = puzzle.svg;
@@ -108,7 +169,7 @@
         svg.appendChild(line);
       });
       
-      graph.nodes.forEach(function(node) {
+      graph.nodes.forEach(function(node, idx) {
         var circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
         circle.setAttribute('cx', scaleX(node[0]));
         circle.setAttribute('cy', scaleY(node[1]));
@@ -117,10 +178,23 @@
         circle.setAttribute('stroke', '#000');
         circle.setAttribute('stroke-width', '0.3');
         svg.appendChild(circle);
+        
+        var text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('x', scaleX(node[0]) + 4);
+        text.setAttribute('y', scaleY(node[1]) - 4);
+        text.setAttribute('font-size', '6');
+        text.setAttribute('fill', '#333');
+        text.textContent = idx;
+        svg.appendChild(text);
       });
       
       puzzle.header.className = 'puzzle-header' + (puzzle.status === 'solved' ? ' solved' : (puzzle.status === 'stuck' ? ' stuck' : ''));
-      puzzle.header.innerHTML = '<span>' + puzzle.count + ' crossings | ' + puzzle.moves + ' moves</span><span>' + (puzzle.lastStrategy || '-') + '</span>';
+      var statusInfo = puzzle.count + ' crossings | ' + puzzle.moves + ' moves';
+      if (puzzle.status === 'stuck') {
+        statusInfo += ' (STUCK @ ' + puzzle.count + ')';
+      }
+      puzzle.header.innerHTML = '<span>' + statusInfo + '</span><span>' + (puzzle.lastStrategy || '-') + '</span>';
+      puzzle.header.title = 'Click puzzle to see history in console';
     }
     
     function solverStep(puzzle, callback) {
@@ -149,6 +223,9 @@
           stats.solved++; 
           puzzle.counted = true;
           addPuzzleBatch(1);
+          
+          // Log solved puzzle summary
+          logSolvedPuzzle(puzzle);
         }
         renderPuzzle(puzzle);
         callback(false);
@@ -161,6 +238,9 @@
           stats.stuck++; 
           puzzle.counted = true;
           addPuzzleBatch(1);
+          
+          // Log stuck puzzle to file for analysis
+          logStuckPuzzle(puzzle);
         }
         renderPuzzle(puzzle);
         callback(false);
@@ -172,6 +252,16 @@
         puzzle.lastStrategy = result.move.strategy;
         puzzle.count = result.count;
         stats.totalMoves++;
+        
+        // Log move to history
+        puzzle.history = puzzle.history || [];
+        puzzle.history.push({
+          n: puzzle.moves,
+          v: result.move.nodeIndex,
+          x: puzzle.count,
+          src: result.move.strategy
+        });
+        
         renderPuzzle(puzzle);
         // Keep running as long as we made a move (escape moves may not "improve" but should continue)
         callback(true);
@@ -216,15 +306,45 @@
           graph: scramble(planarGraph(numNodes)),
           svg: svg,
           header: header,
+          container: div,
           count: 0,
           moves: 0,
           status: 'running',
           lastStrategy: null,
           stuckCount: 0,
-          counted: false
+          counted: false,
+          history: []
         };
         puzzles.push(puzzle);
         puzzle.count = intersections(puzzle.graph.links);
+        puzzle.initialCrossings = puzzle.count;
+        
+        // Click to show history (use IIFE to capture puzzle correctly)
+        (function(p) {
+          div.addEventListener('click', function() {
+            console.log('=== Puzzle #' + p.id + ' ===');
+            console.log('Status:', p.status);
+            console.log('Initial crossings:', p.initialCrossings);
+            console.log('Final crossings:', p.count);
+            console.log('Moves:', p.moves);
+            console.log('History (last 20):');
+            var hist = p.history.slice(-20);
+            hist.forEach(function(h) {
+              console.log('  Move ' + h.n + ': v' + h.v + ' -> ' + h.x + ' crossings (' + h.src + ')');
+            });
+            // Strategy breakdown
+            var strats = {};
+            p.history.forEach(function(h) {
+              strats[h.src] = (strats[h.src] || 0) + 1;
+            });
+            console.log('Strategy breakdown:', strats);
+            // Make history available globally for analysis
+            window.lastPuzzleHistory = p.history;
+            window.lastPuzzle = p;
+            console.log('Full history in window.lastPuzzleHistory, puzzle in window.lastPuzzle');
+          });
+        })(puzzle);
+        
         renderPuzzle(puzzle);
       }
       updateStatus();
@@ -266,10 +386,50 @@
       next();
     }
     
+    // Dump all puzzles to file when stopped
+    function dumpAllPuzzles() {
+      if (!fs) return;
+      
+      var report = {
+        timestamp: new Date().toISOString(),
+        stats: stats,
+        puzzles: puzzles.map(function(p) {
+          var strats = {};
+          p.history.forEach(function(h) {
+            strats[h.src] = (strats[h.src] || 0) + 1;
+          });
+          
+          return {
+            id: p.id,
+            status: p.status,
+            initialCrossings: p.initialCrossings,
+            finalCrossings: p.count,
+            moves: p.moves,
+            strategies: strats,
+            lastMoves: p.history.slice(-20),
+            graph: {
+              nodes: p.graph.nodes.map(function(n) { return [n[0], n[1]]; }),
+              edges: p.graph.links.map(function(l) {
+                return [p.graph.nodes.indexOf(l[0]), p.graph.nodes.indexOf(l[1])];
+              })
+            }
+          };
+        })
+      };
+      
+      try {
+        fs.writeFileSync('dashboard-dump.json', JSON.stringify(report, null, 2));
+        console.log('Dumped all puzzle info to dashboard-dump.json');
+      } catch(e) {
+        console.error('Failed to dump puzzles:', e);
+      }
+    }
+    
     function start() {
       if (running) {
         running = false;
         document.getElementById('start-btn').textContent = 'Start';
+        dumpAllPuzzles();
         return;
       }
       running = true;

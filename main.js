@@ -53,6 +53,25 @@ function startStateServer() {
           res.end(JSON.stringify({ error: e.message }))
         }
       })
+    } else if (req.method === 'POST' && url.pathname === '/load-graph') {
+      let body = ''
+      req.on('data', chunk => body += chunk)
+      req.on('end', () => {
+        try {
+          const graphData = JSON.parse(body)
+          // Forward graph data to renderer
+          if (win && win.webContents) {
+            win.webContents.send('load-graph', graphData)
+            res.end(JSON.stringify({ ok: true, nodes: graphData.nodes.length, edges: graphData.edges.length }))
+          } else {
+            res.statusCode = 500
+            res.end(JSON.stringify({ error: 'No window' }))
+          }
+        } catch(e) {
+          res.statusCode = 400
+          res.end(JSON.stringify({ error: e.message }))
+        }
+      })
     } else {
       res.statusCode = 405
       res.end(JSON.stringify({ error: 'Method not allowed' }))

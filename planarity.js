@@ -75,6 +75,31 @@ function resizeCanvas() {
      .attr("height", h + p * 2);
 }
 
+// Load a graph from serialized JSON format (from dashboard dump)
+// Format: { nodes: [[x,y], ...], edges: [[i,j], ...] }
+function loadGraphFromJSON(data) {
+  moves = 0;
+  start = +new Date;
+  lastCount = null;
+  clearMoveHistory();
+  resizeCanvas();
+  
+  // Reconstruct nodes as arrays with coordinates
+  var newNodes = data.nodes.map(function(n) {
+    return [n[0], n[1]];
+  });
+  
+  // Reconstruct links as references to node objects
+  var newLinks = data.edges.map(function(e) {
+    return [newNodes[e[0]], newNodes[e[1]]];
+  });
+  
+  graph = { nodes: newNodes, links: newLinks };
+  update();
+  
+  console.log('Loaded graph: ' + graph.nodes.length + ' nodes, ' + graph.links.length + ' edges, ' + count + ' crossings');
+}
+
 function generate() {
   moves = 0;
   start = +new Date;

@@ -116,6 +116,7 @@
       <button id="btn-step">Step</button>
       <button id="btn-run">Run</button>
       <button id="btn-compact">Compact</button>
+      <button id="btn-consolidate">Consolidate</button>
       
       <div class="section-label">History</div>
       <div class="history-row">
@@ -160,6 +161,7 @@
     var findEscapeMove = Solver.findEscapeMove;
     var findCompactMove = Solver.findCompactMove;
     var findRelocateMove = Solver.findRelocateMove;
+    var findConsolidateMove = Solver.findConsolidateMove;
     
     // ============ HISTORY MANAGEMENT ============
     
@@ -1002,6 +1004,33 @@
       renderPuzzle(puzzle);
       updateStatus();
       console.log('Compact: applied ' + movesApplied + ' moves');
+    });
+    
+    // Consolidate button - grow the largest cluster by pulling in nearby vertices
+    document.getElementById('btn-consolidate').addEventListener('click', function() {
+      if (puzzles.length === 0) return;
+      var puzzle = puzzles[0];
+      var graph = puzzle.graph;
+      var movesApplied = 0;
+      var maxMoves = 50;
+      
+      while (movesApplied < maxMoves) {
+        var move = findConsolidateMove(graph);
+        if (!move) break;
+        
+        move.node[0] = move.toX;
+        move.node[1] = move.toY;
+        puzzle.moves++;
+        puzzle.lastStrategy = move.strategy;
+        movesApplied++;
+        
+        intersections(graph.links);
+        saveState(puzzle);
+      }
+      
+      renderPuzzle(puzzle);
+      updateStatus();
+      console.log('Consolidate: applied ' + movesApplied + ' moves, cluster size: ' + (move ? move.clusterSize : 'max'));
     });
     
     // History buttons

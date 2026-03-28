@@ -1334,6 +1334,138 @@
     return null;
   }
   
+  // Consolidate: grow the largest geometric cluster by pulling in nearby vertices
+  // This intentionally ignores crossing count - we're building structure
+  function findConsolidateMove(graph) {
+    var MIN_DIST = 0.02;
+    
+    // Find geometric clusters of ALL vertices (not just yellow)
+    var clusterRadius = 0.15;
+    var visited = new Set();
+    var clusters = [];
+    
+    for (var i = 0; i < graph.nodes.length; i++) {
+      var node = graph.nodes[i];
+      if (visited.has(i)) continue;
+      
+      var cluster = [];
+      var queue = [i];
+      visited.add(i);
+      
+      while (queue.length > 0) {
+        var currIdx = queue.shift();
+        var curr = graph.nodes[currIdx];
+        cluster.push({ node: curr, index: currIdx });
+        
+        for (var j = 0; j < graph.nodes.length; j++) {
+          if (visited.has(j)) continue;
+          var other = graph.nodes[j];
+          var dx = curr[0] - other[0];
+          var dy = curr[1] - other[1];
+          if (dx * dx + dy * dy < clusterRadius * clusterRadius) {
+            visited.add(j);
+            queue.push(j);
+          }
+        }
+      }
+      
+      if (cluster.length > 0) clusters.push(cluster);
+    }
+    
+    if (clusters.length === 0) return null;
+    
+    // Find the largest cluster
+    clusters.sort(function(a, b) { return b.length - a.length; });
+    var largest = clusters[0];
+    
+    if (largest.length >= graph.nodes.length * 0.8) {
+      // Already mostly consolidated
+      return null;
+    }
+    
+    // Calculate cluster centroid
+    var cx = 0, cy = 0;
+    for (var i = 0; i < largest.length; i++) {
+      cx += largest[i].node[0];
+      cy += largest[i].node[1];
+    }
+    cx /= largest.length;
+    cy /= largest.length;
+    
+    // Find cluster member indices for quick lookup
+    var inCluster = new Set();
+    for (var i = 0; i < largest.length; i++) {
+      inCluster.add(largest[i].index);
+    }
+    
+    // Find vertices NOT in the cluster, sorted by distance to centroid
+    var candidates = [];
+    for (var i = 0; i < graph.nodes.length; i++) {
+      if (inCluster.has(i)) continue;
+      var node = graph.nodes[i];
+      var dx = node[0] - cx;
+      var dy = node[1] - cy;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      candidates.push({ node: node, index: i, dist: dist });
+    }
+    
+    // Sort by distance - closest first (easier to pull in)
+    candidates.sort(function(a, b) { return a.dist - b.dist; });
+    
+    // Try to pull the closest candidate toward the cluster
+    for (var c = 0; c < Math.min(candidates.length, 10); c++) {
+      var cand = candidates[c];
+      var node = cand.node;
+      var nodeIdx = cand.index;
+      var origX = node[0], origY = node[1];
+      
+      // Move toward cluster centroid
+      var dx = cx - origX;
+      var dy = cy - origY;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist < 0.05) continue;  // already close enough
+      
+      // Move partway toward centroid
+      var moveAmount = Math.min(dist * 0.5, 0.1);
+      var newX = origX + (dx / dist) * moveAmount;
+      var newY = origY + (dy / dist) * moveAmount;
+      
+      // Clamp to valid range
+      newX = Math.max(0.02, Math.min(0.98, newX));
+      newY = Math.max(0.02, Math.min(0.98, newY));
+      
+      // Check minimum distance to other nodes
+      var tooClose = false;
+      for (var j = 0; j < graph.nodes.length; j++) {
+        if (j === nodeIdx) continue;
+        var other = graph.nodes[j];
+        var odx = newX - other[0];
+        var ody = newY - other[1];
+        if (Math.sqrt(odx * odx + ody * ody) < MIN_DIST) {
+          tooClose = true;
+          break;
+        }
+      }
+      if (tooClose) continue;
+      
+      // Accept move regardless of crossing change
+      return {
+        node: node,
+        nodeIndex: nodeIdx,
+        fromX: origX,
+        fromY: origY,
+        toX: newX,
+        toY: newY,
+        improvement: 0,  // we don't care about crossings
+        clusterSize: largest.length,
+        strategy: 'consolidate'
+      };
+    }
+    
+    return null;
+  }
+  
   // Smart escape - target "sore thumb" vertices (long edges + weak anchor)
   function findEscapeMove(graph) {
     var count = intersections(graph.links);
@@ -2654,6 +2786,7 @@
   exports.findUnblockMove = findUnblockMove;
   exports.findCompactMove = findCompactMove;
   exports.findRelocateMove = findRelocateMove;
+  exports.findConsolidateMove = findConsolidateMove;
   exports.findCleanTriangles = findCleanTriangles;
   exports.findLocalMove = findLocalMove;
   exports.findUncrossMove = findUncrossMove;

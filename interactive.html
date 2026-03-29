@@ -671,26 +671,27 @@
       startY: 0,
       offsetX: 0,
       offsetY: 0,
-      puzzle: null
+      puzzle: null,
+      // Cached DOM elements for fast drag
+      circle: null,
+      connectedLines: []
     };
     
     function startDrag(puzzle, node, nodeIndex, event) {
       if (running) return; // Don't drag while auto-running
       
       var svg = puzzle.svg;
-      var rect = svg.getBoundingClientRect();
+      var w = puzzle.width, h = puzzle.height;
+      
+      // Convert screen coordinates to SVG coordinates using the proper SVG transform
+      var pt = svg.createSVGPoint();
+      pt.x = event.clientX;
+      pt.y = event.clientY;
+      var svgPt = pt.matrixTransform(svg.getScreenCTM().inverse());
       
       // Calculate where the mouse clicked in normalized coords
-      var mouseX = event.clientX - rect.left;
-      var mouseY = event.clientY - rect.top;
-      var viewBox = svg.viewBox.baseVal;
-      var scaleX = viewBox.width / rect.width;
-      var scaleY = viewBox.height / rect.height;
-      var svgX = mouseX * scaleX;
-      var svgY = mouseY * scaleY;
-      var w = puzzle.width, h = puzzle.height;
-      var clickNormX = (svgX - 10) / (w - 20);
-      var clickNormY = (svgY - 10) / (h - 20);
+      var clickNormX = (svgPt.x - 10) / (w - 20);
+      var clickNormY = (svgPt.y - 10) / (h - 20);
       
       // Store offset between click position and node position (prevents jump)
       dragState.offsetX = node[0] - clickNormX;
@@ -705,6 +706,23 @@
       
       puzzle.movingNodeIndex = nodeIndex;
       renderPuzzle(puzzle);
+      
+      // Cache DOM elements for fast drag updates
+      var circles = svg.querySelectorAll('circle');
+      var lines = svg.querySelectorAll('line');
+      dragState.circle = circles[nodeIndex];
+      dragState.connectedLines = [];
+      
+      // Find lines connected to this node
+      var lineIdx = 0;
+      puzzle.graph.links.forEach(function(link) {
+        var line = lines[lineIdx++];
+        if (link[0] === node) {
+          dragState.connectedLines.push({ line: line, isSource: true });
+        } else if (link[1] === node) {
+          dragState.connectedLines.push({ line: line, isSource: false });
+        }
+      });
     }
     
     function handleDrag(event) {
@@ -712,35 +730,46 @@
       
       var puzzle = dragState.puzzle;
       var svg = puzzle.svg;
-      var rect = svg.getBoundingClientRect();
-      
-      // Convert mouse position to normalized coordinates
-      var mouseX = event.clientX - rect.left;
-      var mouseY = event.clientY - rect.top;
-      
-      // Account for viewBox scaling
-      var viewBox = svg.viewBox.baseVal;
-      var scaleX = viewBox.width / rect.width;
-      var scaleY = viewBox.height / rect.height;
-      
-      var svgX = mouseX * scaleX;
-      var svgY = mouseY * scaleY;
-      
-      // Convert to normalized 0-1 coordinates
       var w = puzzle.width, h = puzzle.height;
-      var normX = (svgX - 10) / (w - 20) + dragState.offsetX;
-      var normY = (svgY - 10) / (h - 20) + dragState.offsetY;
+      
+      // Convert screen coordinates to SVG coordinates using the proper SVG transform
+      var pt = svg.createSVGPoint();
+      pt.x = event.clientX;
+      pt.y = event.clientY;
+      var svgPt = pt.matrixTransform(svg.getScreenCTM().inverse());
+      
+      // Convert to normalized 0-1 coordinates and apply offset
+      var normX = (svgPt.x - 10) / (w - 20) + dragState.offsetX;
+      var normY = (svgPt.y - 10) / (h - 20) + dragState.offsetY;
       
       // Clamp to bounds
       normX = Math.max(0.02, Math.min(0.98, normX));
       normY = Math.max(0.02, Math.min(0.98, normY));
       
+      // Update data model
       dragState.node[0] = normX;
       dragState.node[1] = normY;
       
-      intersections(puzzle.graph.links);
-      renderPuzzle(puzzle);
-      updateStatus();
+      // Convert back to SVG coordinates for display
+      var displayX = 10 + normX * (w - 20);
+      var displayY = 10 + normY * (h - 20);
+      
+      // Direct DOM updates using cached elements - no queries
+      if (dragState.circle) {
+        dragState.circle.setAttribute('cx', displayX);
+        dragState.circle.setAttribute('cy', displayY);
+      }
+      
+      for (var i = 0; i < dragState.connectedLines.length; i++) {
+        var item = dragState.connectedLines[i];
+        if (item.isSource) {
+          item.line.setAttribute('x1', displayX);
+          item.line.setAttribute('y1', displayY);
+        } else {
+          item.line.setAttribute('x2', displayX);
+          item.line.setAttribute('y2', displayY);
+        }
+      }
     }
     
     function endDrag() {
@@ -785,6 +814,8 @@
       dragState.active = false;
       dragState.node = null;
       dragState.puzzle = null;
+      dragState.circle = null;
+      dragState.connectedLines = [];
       
       renderPuzzle(puzzle);
       updateStatus();

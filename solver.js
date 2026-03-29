@@ -1,15 +1,47 @@
-// Shared solver code for dashboard.html and benchmark.js
-// Browser: include via <script src="solver.js">
-// Node.js: const solver = require('./solver.js')
+// =============================================================================
+// PLANARITY SOLVER
+// =============================================================================
+//
+// Single source of truth for all graph algorithms and solving strategies.
+// See ALGO_ARCHIVE.md for algorithmic decisions, disabled strategies, and history.
+//
+// USAGE:
+//   Browser: <script src="solver.js"> → access via window.Solver
+//   Node.js: const solver = require('./solver.js')
+//
+// FILE STRUCTURE:
+//   Lines ~10-80:    Core graph functions (cross, intersect, intersections, etc.)
+//   Lines ~80-180:   Anchor scoring and weighted centroid
+//   Lines ~180-250:  Incremental crossing detection (fast evaluation)
+//   Lines ~250-550:  Fast strategies (findBestMoveFast, findBottleneckMoveFast)
+//   Lines ~550-650:  Slower reference strategies (findBestMove, findBottleneckMove)
+//   Lines ~650-920:  Finisher and grid strategies (late game)
+//   Lines ~920-1140: Unblock strategy (experimental, not in main loop)
+//   Lines ~1140-1470: Compact/Relocate/Consolidate (manual-only buttons)
+//   Lines ~1470-1600: Escape strategy (last resort)
+//   Lines ~1600-2040: Edge-side and triangle strategies (experimental)
+//   Lines ~2040-2220: Oscillation detection and main solver loop
+//   Lines ~2220-2470: Clump detection and grow-clump strategy
+//   Lines ~2470-2760: Interactive strategies (centroid, local, uncross, wiggle)
+//   Lines ~2760-2800: Exports
+//
+// =============================================================================
 
 (function(exports) {
   
-  // ============ CORE GRAPH FUNCTIONS ============
+  // ===========================================================================
+  // SECTION: CORE GRAPH FUNCTIONS
+  // Basic graph operations: intersection detection, graph generation, neighbors
+  // ===========================================================================
   
+  // cross(a, b): 2D cross product of vectors a and b
   function cross(a, b) {
     return a[0] * b[1] - a[1] * b[0];
   }
   
+  // intersect(a, b): Returns true if line segments a and b cross each other
+  // Each segment is [point1, point2] where point is [x, y]
+  // Uses parametric line intersection with epsilon for numerical stability
   function intersect(a, b) {
     if (a[0] === b[0] && a[1] === b[1] || a[0] === b[1] && a[1] === b[0]) return true;
     var p = a[0], r = [a[1][0] - p[0], a[1][1] - p[1]];
@@ -22,6 +54,10 @@
     return t > epsilon && t < 1 - epsilon && u > epsilon && u < 1 - epsilon;
   }
   
+  // intersections(links): Count all edge crossings and mark involved elements
+  // SIDE EFFECTS: Sets .intersection = true/false on each link and its endpoints
+  // Returns: Total crossing count (the number we're trying to get to zero)
+  // Complexity: O(E²) where E = number of edges
   function intersections(links) {
     var n = links.length, count = 0;
     for (var i = 0; i < n; i++) {
@@ -41,6 +77,9 @@
     return count;
   }
   
+  // planarGraph(n): Generate a random planar graph with n vertices
+  // Algorithm: Place random points, then add edges that don't cross existing ones
+  // Returns: { nodes: [[x,y], ...], links: [[node1, node2], ...] }
   function planarGraph(n) {
     var points = [], links = [];
     for (var i = 0; i < n; i++) points[i] = [Math.random(), Math.random()];
@@ -57,6 +96,8 @@
     return { nodes: points, links: links };
   }
   
+  // scramble(graph): Randomize vertex positions until there are crossings
+  // This creates the puzzle - a planar graph with scrambled positions
   function scramble(graph) {
     if (graph.nodes.length < 4) return graph;
     do {
@@ -68,6 +109,7 @@
     return graph;
   }
   
+  // getNeighbors(graph, node): Return array of nodes connected to this node
   function getNeighbors(graph, node) {
     var neighbors = [];
     graph.links.forEach(function(link) {
@@ -77,10 +119,16 @@
     return neighbors;
   }
   
-  // ============ ANCHOR SCORING ============
-  // Compute how "anchored" a vertex is - high score means fixed/constraining,
-  // low score means free-floating/easily moveable
+  // ===========================================================================
+  // SECTION: ANCHOR SCORING
+  // Determines how "fixed" a vertex is based on its neighborhood.
+  // High anchor = hard to move (neighbors are spread out, conflict-free)
+  // Low anchor = "sore thumb" candidate for escape moves
+  // ===========================================================================
   
+  // anchorScore(graph, node): Returns 0-1 score of how anchored a vertex is
+  // Factors: (1) fraction of yellow neighbors, (2) angular spread, (3) neighbor degree
+  // Used by: findEscapeMove (prefer low-anchor vertices), findUnblockMove
   function anchorScore(graph, node) {
     var neighbors = getNeighbors(graph, node);
     if (neighbors.length === 0) return 0;
@@ -132,8 +180,10 @@
     return score;
   }
   
-  // Compute weighted centroid - weight neighbors by their anchor score
-  // Anchored (yellow, fixed) neighbors pull harder than free-floating ones
+  // weightedCentroid(graph, node): Compute ideal position for a vertex
+  // Yellow/anchored neighbors pull harder than conflicting/loose ones
+  // Returns [x, y] or null if no neighbors
+  // Used by: findAnchoredCentroidMove, findEscapeMove, findRelocateMove
   function weightedCentroid(graph, node) {
     var neighbors = getNeighbors(graph, node);
     if (neighbors.length === 0) return null;
@@ -175,10 +225,14 @@
     return false;
   }
   
-  // ============ INCREMENTAL CROSSING DETECTION ============
-  // Instead of O(E²) full recount, compute delta for a single node move: O(degree × E)
+  // ===========================================================================
+  // SECTION: INCREMENTAL CROSSING DETECTION
+  // Fast evaluation of single-vertex moves without full O(E²) recount.
+  // Key optimization: only recount crossings for edges touching the moved vertex.
+  // Complexity: O(degree × E) instead of O(E²)
+  // ===========================================================================
   
-  // Get edges connected to a node
+  // getNodeEdges(graph, node): Return edges connected to this node
   function getNodeEdges(graph, node) {
     var edges = [];
     for (var i = 0; i < graph.links.length; i++) {
@@ -242,7 +296,13 @@
     return crossingsAfter - crossingsBefore; // negative = improvement
   }
   
-  // Fast version of findBestMove using incremental evaluation
+  // ===========================================================================
+  // SECTION: FAST STRATEGIES (used in main loop)
+  // These use incremental evaluation for speed and are called by solverStep.
+  // ===========================================================================
+  
+  // findBestMoveFast: Sample random positions for conflicting vertices
+  // ACTIVE in solverStep: Early/Mid game
   function findBestMoveFast(graph, samplesPerNode) {
     samplesPerNode = samplesPerNode || 30;
     var count = intersections(graph.links);
@@ -1138,8 +1198,14 @@
     return null;
   }
   
-  // Compact strategy: move yellow vertices closer together to free up space
-  // Uses LOCAL cluster centroids, not global - creates tight local groups
+  // ===========================================================================
+  // SECTION: MANUAL-ONLY STRATEGIES (buttons in interactive mode)
+  // These are NOT called by solverStep - available as manual tools only.
+  // Removed from auto loop because they were causing issues (see ALGO_ARCHIVE.md)
+  // ===========================================================================
+  
+  // findCompactMove: Move yellow vertices toward local cluster centroids
+  // MANUAL ONLY - was causing solver to get stuck faster
   var MIN_COMPACT_DIST = 0.02;  // ~8 pixels minimum spacing between vertices
   
   function findCompactMove(graph) {
@@ -1466,7 +1532,14 @@
     return null;
   }
   
-  // Smart escape - target "sore thumb" vertices (long edges + weak anchor)
+  // ===========================================================================
+  // SECTION: ESCAPE STRATEGY (last resort in main loop)
+  // Called when all other strategies fail. May increase crossings by up to 5.
+  // Targets "sore thumb" vertices: long edges + weak anchor score.
+  // ===========================================================================
+  
+  // findEscapeMove: Reposition a problematic vertex when stuck
+  // ACTIVE in solverStep: Fallback after all other strategies fail
   function findEscapeMove(graph) {
     var count = intersections(graph.links);
     var candidates = graph.nodes.filter(function(n) { return n.intersection; });
@@ -1590,8 +1663,14 @@
     return null;
   }
   
-  // Determine which side of an edge a point is on
-  // Returns positive, negative, or ~0
+  // ===========================================================================
+  // SECTION: EXPERIMENTAL STRATEGIES (not in main loop)
+  // These exist but are NOT called by solverStep. See ALGO_ARCHIVE.md.
+  // Kept for potential future use or reference.
+  // ===========================================================================
+  
+  // sideOfEdge: Helper - which side of a line segment is a point on?
+  // Returns positive, negative, or ~0 (on the line)
   function sideOfEdge(edge, point) {
     var ax = edge[0][0], ay = edge[0][1];
     var bx = edge[1][0], by = edge[1][1];
@@ -2034,7 +2113,15 @@
     return null;
   }
   
-  // Check if a move would cause oscillation (returning to a recent position)
+  // ===========================================================================
+  // SECTION: MAIN SOLVER LOOP
+  // Orchestrates strategy selection based on crossing count (game phase).
+  // Includes oscillation detection to prevent strategies from fighting.
+  // See ALGO_ARCHIVE.md for disabled strategies and their history.
+  // ===========================================================================
+  
+  // wouldOscillate: Returns true if this move would return vertex to a recent position
+  // Prevents infinite loops where strategies keep undoing each other
   function wouldOscillate(state, nodeIndex, toX, toY) {
     if (!state.recentMoves) return false;
     var dominated = 0;
@@ -2074,7 +2161,21 @@
     return move;
   }
   
-  // Main solver step - stage-aware strategy selection
+  // solverStep(graph, state): Execute one solver iteration
+  // 
+  // PHASE-BASED STRATEGY SELECTION:
+  //   Early game (>50 crossings): findBottleneckMoveFast, findBestMoveFast
+  //   Mid game (15-50 crossings): + findGridMove, findGrowClumpMove  
+  //   Late game (<15 crossings): + findFinisherMove, findLocalMove
+  //
+  // FALLBACK CHAIN:
+  //   1. Try phase-appropriate strategies
+  //   2. Try findAnchoredCentroidMove (gentle repositioning)
+  //   3. Try findEscapeMove (last resort, may increase crossings by up to 5)
+  //   4. Give up if stuck too long (stuckLimit varies by crossing count)
+  //
+  // RETURNS: { done, improved, move, count, stuck?, wouldEscape? }
+  //
   function solverStep(graph, state) {
     state = state || {};
     state.totalMoves = (state.totalMoves || 0) + 1;
@@ -2087,7 +2188,6 @@
     var best = null;
     
     // Try strategies in order - if oscillation blocks one, try the next
-    // Early game (many crossings): use fast incremental evaluation
     if (count > 50) {
       best = tryMove(graph, state, findBottleneckMoveFast, 25);
       if (!best) best = tryMove(graph, state, findBestMoveFast, 35);
@@ -2210,7 +2310,11 @@
     return { solved: false, moves: moves, initialCrossings: initialCrossings, finalCrossings: finalCrossings, strategyUsage: strategyUsage, reason: 'max-moves' };
   }
   
-  // ============ CLUMP-BASED MOVES ============
+  // ===========================================================================
+  // SECTION: CLUMP-BASED STRATEGIES
+  // Find and grow clusters of conflict-free (yellow) vertices.
+  // findGrowClumpMove is ACTIVE in solverStep (mid/late game).
+  // ===========================================================================
   
   // Find clumps of conflict-free vertices (spatially connected yellow regions)
   function findClumps(graph, maxDist) {
@@ -2450,10 +2554,14 @@
     return bestMove;
   }
   
-  // ============ INTERACTIVE STRATEGIES ============
-  // Moved from planarity.js - simpler strategies for interactive mode
+  // ===========================================================================
+  // SECTION: INTERACTIVE/UI STRATEGIES
+  // Simple strategies available as buttons in the UI.
+  // findLocalMove and findAnchoredCentroidMove are also used in solverStep.
+  // findUncrossMove, findWiggleMove are UI-only.
+  // ===========================================================================
   
-  // Helper: calculate centroid of a set of nodes
+  // centroid(nodes): Simple average position of a set of nodes
   function centroid(nodes) {
     if (nodes.length === 0) return null;
     var cx = 0, cy = 0;

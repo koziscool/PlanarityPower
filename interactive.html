@@ -192,9 +192,33 @@
     
     // ============ HISTORY MANAGEMENT ============
     
-    function saveState(puzzle) {
+    function roundedPoint(x, y) {
+      return [parseFloat(x.toFixed(6)), parseFloat(y.toFixed(6))];
+    }
+
+    function makeMoveRecord(source, strategy, vertex, fromX, fromY, toX, toY,
+        crossingsBefore, crossingsAfter, rationale) {
+      return {
+        source: source,
+        strategy: strategy,
+        vertex: vertex,
+        from: roundedPoint(fromX, fromY),
+        to: roundedPoint(toX, toY),
+        crossingsBefore: crossingsBefore,
+        crossingsAfter: crossingsAfter,
+        improvement: crossingsBefore - crossingsAfter,
+        rationale: rationale || null
+      };
+    }
+
+    function saveState(puzzle, moveRecord) {
       // Save current vertex positions
       var positions = puzzle.graph.nodes.map(function(n) { return [n[0], n[1]]; });
+      puzzle.count = intersections(puzzle.graph.links);
+      if (moveRecord) {
+        moveRecord.number = puzzle.moves;
+        moveRecord.timestamp = moveRecord.timestamp || new Date().toISOString();
+      }
       
       // If we're in the middle of history, truncate forward history
       if (puzzle.historyIndex < puzzle.history.length - 1) {
@@ -205,7 +229,8 @@
         positions: positions,
         crossings: puzzle.count,
         strategy: puzzle.lastStrategy,
-        movingNode: puzzle.movingNodeIndex
+        movingNode: moveRecord ? moveRecord.vertex : null,
+        move: moveRecord || null
       });
       puzzle.historyIndex = puzzle.history.length - 1;
     }
@@ -285,6 +310,11 @@
       
       if (puzzle.count === 0) {
         puzzle.status = 'solved';
+        if (!puzzle.history.length ||
+            puzzle.history[puzzle.history.length - 1].crossings !== 0) {
+          saveState(puzzle, null);
+        }
+        saveStateToFile(puzzle);
         if (callback) callback(false);
         return;
       }
@@ -305,6 +335,11 @@
       if (result.done) {
         puzzle.status = 'solved';
         puzzle.count = 0;
+        if (!puzzle.history.length ||
+            puzzle.history[puzzle.history.length - 1].crossings !== 0) {
+          saveState(puzzle, null);
+        }
+        saveStateToFile(puzzle);
         renderPuzzle(puzzle);
         updateStatus();
         if (callback) callback(false);
@@ -349,10 +384,27 @@
         puzzle.count = result.count;
         
         animateMove(puzzle, move.node, move.fromX, move.fromY, toX, toY, function() {
+          var moveRecord = makeMoveRecord(
+            'algorithm',
+            move.strategy,
+            nodeIndex,
+            move.fromX,
+            move.fromY,
+            toX,
+            toY,
+            puzzle.history[puzzle.historyIndex].crossings,
+            puzzle.count,
+            move.search || {
+              improvement: move.improvement,
+              displacement: move.displacement === undefined ? null : move.displacement,
+              priorMinimizeAttempt: puzzle.solverState.lastMinimizeAttempt || null
+            }
+          );
           // Log move
-          logMove(puzzle.moves, nodeIndex, toX, toY, puzzle.count, move.strategy, null);
+          logMove(puzzle.moves, moveRecord);
           
-          saveState(puzzle);
+          saveState(puzzle, moveRecord);
+          saveStateToFile(puzzle);
           updateStatus();
           // Keep running as long as we made a move (escape moves may not "improve" but should continue)
           if (callback) callback(true);
@@ -518,13 +570,16 @@
       if (!puzzle) return;
       
       var graph = puzzle.graph;
-      intersections(graph.links);
+      puzzle.count = intersections(graph.links);
       var clumps = findClumps(graph);
       
       var state = {
+        schemaVersion: 2,
         timestamp: new Date().toISOString(),
+        session: sessionId,
         currentPosition: puzzle.historyIndex,
         headPosition: puzzle.history.length - 1,
+        lastMove: puzzle.history.length ? puzzle.history[puzzle.history.length - 1].move : null,
         moves: puzzle.moves,
         crossings: puzzle.count,
         totalVertices: graph.nodes.length,
@@ -667,6 +722,7 @@
       var graph = puzzle.graph;
       var entry = {
         type: 'init',
+        schemaVersion: 2,
         ts: new Date().toISOString(),
         session: sessionId,
         nodes: graph.nodes.map(function(n) { 
@@ -700,20 +756,22 @@
       console.log('Initial state logged:', entry.nodes.length, 'nodes,', entry.edges.length, 'edges,', entry.crossings, 'crossings');
     }
     
-    function logMove(moveNum, vertexIdx, toX, toY, crossingsAfter, source, alternatives) {
+    function logMove(moveNum, moveRecord) {
       var entry = {
         type: 'move',
         ts: new Date().toISOString(),
+        session: sessionId,
         n: moveNum,
-        v: vertexIdx,
-        to: [parseFloat(toX.toFixed(4)), parseFloat(toY.toFixed(4))],
-        x: crossingsAfter,
-        src: source
+        v: moveRecord.vertex,
+        from: moveRecord.from,
+        to: moveRecord.to,
+        before: moveRecord.crossingsBefore,
+        x: moveRecord.crossingsAfter,
+        improvement: moveRecord.improvement,
+        src: moveRecord.source,
+        strategy: moveRecord.strategy,
+        rationale: moveRecord.rationale
       };
-      
-      if (alternatives && Object.keys(alternatives).length > 0) {
-        entry.alt = alternatives;
-      }
       
       // Send via IPC (primary)
       if (ipcRenderer) {
@@ -735,7 +793,10 @@
     
     // Legacy wrapper for compatibility
     function logMoveHistory(moveNum, vertexIdx, fromX, fromY, toX, toY, crossingsBefore, crossingsAfter, source) {
-      logMove(moveNum, vertexIdx, toX, toY, crossingsAfter, source, null);
+      logMove(moveNum, makeMoveRecord(
+        source, source, vertexIdx, fromX, fromY, toX, toY,
+        crossingsBefore, crossingsAfter, null
+      ));
     }
 
     function postStateServer(endpoint, payload) {
@@ -754,6 +815,7 @@
 
     function buildDebugHistory(puzzle) {
       return {
+        schemaVersion: 2,
         timestamp: new Date().toISOString(),
         session: sessionId,
         moves: puzzle.moves,
@@ -940,10 +1002,14 @@
         ' (' + (improvement >= 0 ? '+' : '') + improvement + ')');
       
       // Log to move history file
-      logMoveHistory(puzzle.moves, dragState.nodeIndex, fromX, fromY, toX, toY, crossingsBefore, crossingsAfter, 'manual');
+      var moveRecord = makeMoveRecord(
+        'manual', 'manual', dragState.nodeIndex, fromX, fromY, toX, toY,
+        crossingsBefore, crossingsAfter, null
+      );
+      logMove(puzzle.moves, moveRecord);
       
       // Save state after drag
-      saveState(puzzle);
+      saveState(puzzle, moveRecord);
       
       dragState.active = false;
       dragState.node = null;
@@ -1251,6 +1317,10 @@
       if (!puzzle.stage2Suggestion) return;
 
       var before = intersections(puzzle.graph.links);
+      var suggestion = puzzle.stage2Suggestion;
+      var movedBefore = suggestion.component.map(function(index) {
+        return { index: index, position: roundedPoint(puzzle.graph.nodes[index][0], puzzle.graph.nodes[index][1]) };
+      });
       if (!applyStage2Suggestion(puzzle.graph, puzzle.stage2Suggestion)) return;
       var after = intersections(puzzle.graph.links);
       puzzle.moves++;
@@ -1260,7 +1330,28 @@
       puzzle.stage2Suggestion = null;
       puzzle.stage2Report = null;
       puzzle.count = after;
-      saveState(puzzle);
+      var stage2Record = {
+        source: 'algorithm',
+        strategy: suggestion.strategy,
+        vertex: suggestion.component.length === 1 ? suggestion.component[0] : null,
+        vertices: suggestion.component.slice(),
+        from: movedBefore,
+        to: suggestion.component.map(function(index) {
+          return { index: index, position: roundedPoint(puzzle.graph.nodes[index][0], puzzle.graph.nodes[index][1]) };
+        }),
+        crossingsBefore: before,
+        crossingsAfter: after,
+        improvement: before - after,
+        rationale: {
+          reason: suggestion.reason,
+          immediateDamage: suggestion.immediateDamage,
+          downstreamImprovement: suggestion.downstreamImprovement,
+          simulationSteps: suggestion.simulationSteps
+        }
+      };
+      logMove(puzzle.moves, stage2Record);
+      saveState(puzzle, stage2Record);
+      saveStateToFile(puzzle);
       updateStage2Diagnosis(puzzle, null);
       renderPuzzle(puzzle);
       updateStatus();
@@ -1286,19 +1377,28 @@
           move = findRelocateMove(graph);
         }
         if (!move) break;
-        
+        var crossingsBefore = intersections(graph.links);
         move.node[0] = move.toX;
         move.node[1] = move.toY;
+        var crossingsAfter = intersections(graph.links);
         puzzle.moves++;
         puzzle.lastStrategy = move.strategy;
         movesApplied++;
-        
-        intersections(graph.links);
-        saveState(puzzle);
+
+        var moveRecord = makeMoveRecord(
+          'algorithm', move.strategy, graph.nodes.indexOf(move.node),
+          move.fromX, move.fromY, move.toX, move.toY,
+          crossingsBefore, crossingsAfter, {
+            displacement: move.displacement === undefined ? null : move.displacement
+          }
+        );
+        logMove(puzzle.moves, moveRecord);
+        saveState(puzzle, moveRecord);
       }
       
       renderPuzzle(puzzle);
       updateStatus();
+      saveStateToFile(puzzle);
       console.log('Compact: applied ' + movesApplied + ' moves');
     });
     
@@ -1315,19 +1415,27 @@
       while (movesApplied < maxMoves) {
         var move = findConsolidateMove(graph);
         if (!move) break;
-        
+
+        var crossingsBefore = intersections(graph.links);
         move.node[0] = move.toX;
         move.node[1] = move.toY;
+        var crossingsAfter = intersections(graph.links);
         puzzle.moves++;
         puzzle.lastStrategy = move.strategy;
         movesApplied++;
-        
-        intersections(graph.links);
-        saveState(puzzle);
+
+        var moveRecord = makeMoveRecord(
+          'algorithm', move.strategy, graph.nodes.indexOf(move.node),
+          move.fromX, move.fromY, move.toX, move.toY,
+          crossingsBefore, crossingsAfter, { clusterSize: move.clusterSize }
+        );
+        logMove(puzzle.moves, moveRecord);
+        saveState(puzzle, moveRecord);
       }
       
       renderPuzzle(puzzle);
       updateStatus();
+      saveStateToFile(puzzle);
       console.log('Consolidate: applied ' + movesApplied + ' moves, cluster size: ' + (move ? move.clusterSize : 'max'));
     });
     
@@ -1480,13 +1588,15 @@
                   ' from (' + fromX.toFixed(3) + ',' + fromY.toFixed(3) + ')' +
                   ' to (' + node[0].toFixed(3) + ',' + node[1].toFixed(3) + ')');
                 
-                saveState(puzzle);
+                var moveRecord = makeMoveRecord(
+                  'external', 'ai-file', move.vertex, fromX, fromY,
+                  node[0], node[1], crossingsBefore, crossingsAfter, null
+                );
+                logMove(puzzle.moves, moveRecord);
+                saveState(puzzle, moveRecord);
                 renderPuzzle(puzzle);
                 updateStatus();
                 saveStateToFile(puzzle);
-                
-                // Log to move history
-                logMoveHistory(puzzle.moves, move.vertex, fromX, fromY, node[0], node[1], crossingsBefore, crossingsAfter, 'ai');
               }
             }
           }
@@ -1518,12 +1628,19 @@
         if (move.vertex !== undefined && move.x !== undefined && move.y !== undefined) {
           if (move.vertex >= 0 && move.vertex < graph.nodes.length) {
             var node = graph.nodes[move.vertex];
+            var fromX = node[0], fromY = node[1];
+            var crossingsBefore = intersections(graph.links);
             node[0] = Math.max(0.02, Math.min(0.98, move.x));
             node[1] = Math.max(0.02, Math.min(0.98, move.y));
             puzzle.moves++;
             puzzle.lastStrategy = 'ai-ipc';
-            intersections(graph.links);
-            saveState(puzzle);
+            var crossingsAfter = intersections(graph.links);
+            var moveRecord = makeMoveRecord(
+              'external', 'ai-ipc', move.vertex, fromX, fromY,
+              node[0], node[1], crossingsBefore, crossingsAfter, null
+            );
+            logMove(puzzle.moves, moveRecord);
+            saveState(puzzle, moveRecord);
             renderPuzzle(puzzle);
             updateStatus();
             saveStateToFile(puzzle);

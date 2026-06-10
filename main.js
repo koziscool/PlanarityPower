@@ -10,6 +10,7 @@ const STATE_PORT = 9876
 const stateFilePath = path.join(__dirname, 'dashboard-state.json')
 const moveHistoryFilePath = path.join(__dirname, 'move-history.jsonl')
 const debugHistoryFilePath = path.join(__dirname, 'interactive-history.json')
+const consolidationDemoFilePath = path.join(__dirname, 'consolidation-demo.json')
 
 function writeState(state) {
   currentState = state
@@ -124,6 +125,11 @@ ipcMain.handle('write-debug-history', (event, history) => {
   return writeDebugHistory(history)
 })
 
+ipcMain.handle('write-consolidation-demo', (event, demo) => {
+  fs.writeFileSync(consolidationDemoFilePath, JSON.stringify(demo, null, 2))
+  return consolidationDemoFilePath
+})
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1400,
@@ -142,6 +148,7 @@ function createWindow() {
       submenu: [
         { label: 'Main Game', click: () => win.loadFile('index.html') },
         { label: 'Interactive Training', click: () => win.loadFile('interactive.html') },
+        { label: 'Consolidation Test', click: () => win.loadFile('testconsolidate.html') },
         { label: 'Solver Dashboard', click: () => win.loadFile('solver.html') },
         { type: 'separator' },
         { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: () => win.reload() },

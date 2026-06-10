@@ -1864,6 +1864,167 @@
     
     return null;
   }
+
+  // Build a compact final embedding, then reach it one vertex at a time.
+  // Uniformly scaling the final embedding preserves planarity; the scheduler's
+  // job is to order individual moves through temporary directional constraints.
+  function createConsolidationState(graph, factor) {
+    factor = factor || 2.5;
+    var cx = 0, cy = 0;
+    for (var i = 0; i < graph.nodes.length; i++) {
+      cx += graph.nodes[i][0];
+      cy += graph.nodes[i][1];
+    }
+    cx /= graph.nodes.length;
+    cy /= graph.nodes.length;
+
+    return {
+      factor: factor,
+      center: [cx, cy],
+      targetPositions: graph.nodes.map(function(node) {
+        return [
+          cx + (node[0] - cx) / factor,
+          cy + (node[1] - cy) / factor
+        ];
+      }),
+      finished: {},
+      finishedAxes: {},
+      moves: [],
+      initialCrossings: intersections(graph.links)
+    };
+  }
+
+  function consolidationBlockers(graph, nodeIndex, toX, toY) {
+    var node = graph.nodes[nodeIndex];
+    var fromX = node[0], fromY = node[1];
+    var moveX = toX - fromX, moveY = toY - fromY;
+    var moveLength = Math.sqrt(moveX * moveX + moveY * moveY) || 1;
+    var incident = [];
+    var blockers = {};
+
+    for (var i = 0; i < graph.links.length; i++) {
+      if (graph.links[i][0] === node || graph.links[i][1] === node) {
+        incident.push(i);
+      }
+    }
+
+    node[0] = toX;
+    node[1] = toY;
+    for (var a = 0; a < incident.length; a++) {
+      var incidentIndex = incident[a];
+      var movedEdge = graph.links[incidentIndex];
+      for (var b = 0; b < graph.links.length; b++) {
+        if (b === incidentIndex || incident.indexOf(b) >= 0) continue;
+        var edge = graph.links[b];
+        if (!intersect(movedEdge, edge)) continue;
+
+        var edgeX = edge[1][0] - edge[0][0];
+        var edgeY = edge[1][1] - edge[0][1];
+        var edgeLength = Math.sqrt(edgeX * edgeX + edgeY * edgeY) || 1;
+        var alignment = Math.abs((moveX * edgeX + moveY * edgeY) /
+          (moveLength * edgeLength));
+        blockers[b] = {
+          edgeIndex: b,
+          vertices: [graph.nodes.indexOf(edge[0]), graph.nodes.indexOf(edge[1])],
+          alignment: alignment,
+          orthogonal: alignment < 0.5
+        };
+      }
+    }
+    node[0] = fromX;
+    node[1] = fromY;
+
+    return Object.keys(blockers).map(function(key) { return blockers[key]; });
+  }
+
+  function findDirectionalConsolidateMove(graph, state) {
+    if (!state || !state.targetPositions) return null;
+    var currentCrossings = intersections(graph.links);
+    var candidates = [];
+
+    for (var i = 0; i < graph.nodes.length; i++) {
+      if (state.finished[i]) continue;
+      var node = graph.nodes[i];
+      var target = state.targetPositions[i];
+      var axes = state.finishedAxes[i] || (state.finishedAxes[i] = {});
+
+      ['x', 'y'].forEach(function(axis) {
+        if (axes[axis]) return;
+        var axisIndex = axis === 'x' ? 0 : 1;
+        var distance = Math.abs(target[axisIndex] - node[axisIndex]);
+        if (distance < 1e-5) {
+          axes[axis] = true;
+          return;
+        }
+
+        var fromX = node[0], fromY = node[1];
+        var toX = axis === 'x' ? target[0] : fromX;
+        var toY = axis === 'y' ? target[1] : fromY;
+        var blockers = consolidationBlockers(graph, i, toX, toY);
+        node[0] = toX;
+        node[1] = toY;
+        var newCrossings = intersections(graph.links);
+        node[0] = fromX;
+        node[1] = fromY;
+
+        var orthogonalCount = blockers.filter(function(blocker) {
+          return blocker.orthogonal;
+        }).length;
+        candidates.push({
+          node: node,
+          nodeIndex: i,
+          axis: axis,
+          fromX: fromX,
+          fromY: fromY,
+          toX: toX,
+          toY: toY,
+          distance: distance,
+          crossingsBefore: currentCrossings,
+          crossingsAfter: newCrossings,
+          crossingDelta: newCrossings - currentCrossings,
+          blockers: blockers,
+          orthogonalBlockers: orthogonalCount,
+          strategy: 'directional-consolidate-' + axis
+        });
+      });
+
+      if (axes.x && axes.y) state.finished[i] = true;
+    }
+
+    intersections(graph.links);
+    if (candidates.length === 0) return null;
+
+    // A player first takes moves with little obstruction. Among equally safe
+    // moves, larger moves create useful room for the remaining vertices.
+    candidates.sort(function(a, b) {
+      if (a.crossingsAfter !== b.crossingsAfter) {
+        return a.crossingsAfter - b.crossingsAfter;
+      }
+      if (a.orthogonalBlockers !== b.orthogonalBlockers) {
+        return a.orthogonalBlockers - b.orthogonalBlockers;
+      }
+      return b.distance - a.distance;
+    });
+    return candidates[0];
+  }
+
+  function applyDirectionalConsolidateMove(graph, state, move) {
+    if (!move || !state) return false;
+    move.node[0] = move.toX;
+    move.node[1] = move.toY;
+    state.finishedAxes[move.nodeIndex][move.axis] = true;
+    if (state.finishedAxes[move.nodeIndex].x && state.finishedAxes[move.nodeIndex].y) {
+      state.finished[move.nodeIndex] = true;
+    }
+    state.moves.push({
+      nodeIndex: move.nodeIndex,
+      axis: move.axis,
+      crossingsBefore: move.crossingsBefore,
+      crossingsAfter: intersections(graph.links),
+      orthogonalBlockers: move.orthogonalBlockers
+    });
+    return true;
+  }
   
   // ===========================================================================
   // SECTION: STAGE 2 - BARRIER MOVES (topological boundary reasoning)
@@ -3215,6 +3376,9 @@
   exports.findCompactMove = findCompactMove;
   exports.findRelocateMove = findRelocateMove;
   exports.findConsolidateMove = findConsolidateMove;
+  exports.createConsolidationState = createConsolidationState;
+  exports.findDirectionalConsolidateMove = findDirectionalConsolidateMove;
+  exports.applyDirectionalConsolidateMove = applyDirectionalConsolidateMove;
   exports.findLocalMove = findLocalMove;
   exports.findUncrossMove = findUncrossMove;
   exports.findWiggleMove = findWiggleMove;

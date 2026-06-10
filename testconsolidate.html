@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Planarity Consolidation Test</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 10px;
+      overflow: hidden;
+      font-family: sans-serif;
+      background: #1a1a1a;
+      color: #fff;
+    }
+    .controls {
+      margin-bottom: 10px;
+      padding: 10px;
+      background: #333;
+      border-radius: 5px;
+    }
+    .controls button { padding: 8px 14px; margin-right: 8px; cursor: pointer; }
+    .controls label { margin-right: 16px; }
+    .main {
+      display: flex;
+      gap: 15px;
+      height: calc(100vh - 70px);
+    }
+    .puzzle {
+      flex: 1;
+      min-width: 0;
+      background: #fff;
+      border-radius: 5px;
+      overflow: hidden;
+    }
+    svg { width: 100%; height: 100%; }
+    .side {
+      width: 290px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .box {
+      padding: 9px;
+      border: 1px solid #555;
+      border-radius: 4px;
+      background: #222;
+      font: 12px/1.5 monospace;
+    }
+    .side button {
+      padding: 10px;
+      cursor: pointer;
+      color: #fff;
+      border: 1px solid #555;
+      border-radius: 4px;
+      background: #444;
+    }
+    .good { color: #8d8; }
+    .bad { color: #f88; }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <label>Nodes: <input id="num-nodes" type="number" value="30" min="5" max="100" style="width:55px"></label>
+    <label>Target shrink: <input id="factor" type="number" value="2.5" min="1.2" max="5" step="0.1" style="width:55px"></label>
+    <button id="new-graph">New Solved Graph</button>
+    <button id="reset">Reset Positions</button>
+    <button id="undo">Undo</button>
+    <span id="status"></span>
+  </div>
+
+  <div class="main">
+    <div class="puzzle"><svg id="graph" viewBox="0 0 600 500" preserveAspectRatio="xMidYMid meet"></svg></div>
+    <div class="side">
+      <div class="box">
+        Drag one numbered vertex at a time. Moves that create crossings are rejected.
+      </div>
+      <div id="metrics" class="box"></div>
+      <button id="prepare-auto">Prepare Compact Target</button>
+      <button id="auto-step">Auto One Vertex</button>
+      <button id="auto-run">Run Auto</button>
+      <div id="auto-diagnosis" class="box">No compact target prepared.</div>
+      <button id="write-demo">Write Consolidation Demo</button>
+      <div id="moves" class="box">No moves yet.</div>
+    </div>
+  </div>
+
+  <script src="solver.js"></script>
+  <script>
+    var Solver = window.Solver;
+    var ipcRenderer = null;
+    if (typeof require !== 'undefined') {
+      try {
+        Solver = require('./solver.js');
+        ipcRenderer = require('electron').ipcRenderer;
+      } catch (e) {}
+    }
+
+    var svg = document.getElementById('graph');
+    var graph = null;
+    var initial = null;
+    var moves = [];
+    var drag = null;
+    var rejectedMoves = 0;
+    var consolidationState = null;
+    var autoRunning = false;
+
+    function copyPositions(nodes) {
+      return nodes.map(function(node) { return [node[0], node[1]]; });
+    }
+
+    function bounds(nodes) {
+      var xs = nodes.map(function(node) { return node[0]; });
+      var ys = nodes.map(function(node) { return node[1]; });
+      var minX = Math.min.apply(null, xs);
+      var maxX = Math.max.apply(null, xs);
+      var minY = Math.min.apply(null, ys);
+      var maxY = Math.max.apply(null, ys);
+      return {
+        minX: minX, maxX: maxX, minY: minY, maxY: maxY,
+        width: maxX - minX,
+        height: maxY - minY,
+        area: (maxX - minX) * (maxY - minY)
+      };
+    }
+
+    function scaleX(value) { return 10 + value * 580; }
+    function scaleY(value) { return 10 + value * 480; }
+
+    function render() {
+      Solver.intersections(graph.links);
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+      var b = bounds(graph.nodes);
+      var rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      rect.setAttribute('x', scaleX(b.minX));
+      rect.setAttribute('y', scaleY(b.minY));
+      rect.setAttribute('width', Math.max(1, b.width * 580));
+      rect.setAttribute('height', Math.max(1, b.height * 480));
+      rect.setAttribute('fill', 'rgba(0, 160, 0, 0.05)');
+      rect.setAttribute('stroke', '#0a0');
+      rect.setAttribute('stroke-dasharray', '4 3');
+      svg.appendChild(rect);
+
+      graph.links.forEach(function(link) {
+        var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', scaleX(link[0][0]));
+        line.setAttribute('y1', scaleY(link[0][1]));
+        line.setAttribute('x2', scaleX(link[1][0]));
+        line.setAttribute('y2', scaleY(link[1][1]));
+        line.setAttribute('stroke', link.intersection ? '#d00' : '#555');
+        line.setAttribute('stroke-width', '1');
+        svg.appendChild(line);
+      });
+
+      graph.nodes.forEach(function(node, index) {
+        var circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', scaleX(node[0]));
+        circle.setAttribute('cy', scaleY(node[1]));
+        circle.setAttribute('r', '5');
+        circle.setAttribute('fill', '#fc0');
+        circle.setAttribute('stroke', '#000');
+        circle.setAttribute('data-index', index);
+        circle.style.cursor = 'grab';
+        circle.addEventListener('mousedown', startDrag);
+        svg.appendChild(circle);
+
+        var text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('x', scaleX(node[0]) + 7);
+        text.setAttribute('y', scaleY(node[1]) - 7);
+        text.setAttribute('fill', '#111');
+        text.setAttribute('font-size', '11');
+        text.setAttribute('font-weight', 'bold');
+        text.setAttribute('pointer-events', 'none');
+        text.textContent = index;
+        svg.appendChild(text);
+      });
+
+      if (consolidationState) {
+        consolidationState.targetPositions.forEach(function(target, index) {
+          if (consolidationState.finished[index]) return;
+          var ghost = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          ghost.setAttribute('cx', scaleX(target[0]));
+          ghost.setAttribute('cy', scaleY(target[1]));
+          ghost.setAttribute('r', '3');
+          ghost.setAttribute('fill', 'none');
+          ghost.setAttribute('stroke', '#0a0');
+          ghost.setAttribute('stroke-dasharray', '2 2');
+          ghost.setAttribute('pointer-events', 'none');
+          svg.appendChild(ghost);
+        });
+      }
+
+      updatePanels();
+    }
+
+    function updatePanels() {
+      var current = bounds(graph.nodes);
+      var original = bounds(initial.nodes);
+      var ratio = current.area / original.area;
+      document.getElementById('metrics').innerHTML =
+        '<div>Crossings: <span class="' + (Solver.intersections(graph.links) ? 'bad' : 'good') + '">' +
+          Solver.intersections(graph.links) + '</span></div>' +
+        '<div>Moves: ' + moves.length + '</div>' +
+        '<div>Rejected crossing moves: ' + rejectedMoves + '</div>' +
+        '<div>Width: ' + current.width.toFixed(3) + ' (' + (current.width / original.width).toFixed(2) + 'x)</div>' +
+        '<div>Height: ' + current.height.toFixed(3) + ' (' + (current.height / original.height).toFixed(2) + 'x)</div>' +
+        '<div>Bounding area: ' + current.area.toFixed(3) + ' (' + ratio.toFixed(2) + 'x)</div>';
+      document.getElementById('moves').innerHTML = moves.length
+        ? moves.slice(-15).map(function(move, i) {
+            return '<div>' + (moves.length - Math.min(15, moves.length) + i + 1) +
+              ': v' + move.vertex + ' area ' + move.areaAfter.toFixed(3) + '</div>';
+          }).join('')
+        : 'No moves yet.';
+    }
+
+    function svgPoint(event) {
+      var point = svg.createSVGPoint();
+      point.x = event.clientX;
+      point.y = event.clientY;
+      return point.matrixTransform(svg.getScreenCTM().inverse());
+    }
+
+    function startDrag(event) {
+      var index = parseInt(event.target.getAttribute('data-index'), 10);
+      var node = graph.nodes[index];
+      drag = { index: index, from: [node[0], node[1]] };
+      event.preventDefault();
+    }
+
+    function moveDrag(event) {
+      if (!drag) return;
+      var point = svgPoint(event);
+      var node = graph.nodes[drag.index];
+      node[0] = Math.max(0.01, Math.min(0.99, (point.x - 10) / 580));
+      node[1] = Math.max(0.01, Math.min(0.99, (point.y - 10) / 480));
+      render();
+    }
+
+    function endDrag() {
+      if (!drag) return;
+      var node = graph.nodes[drag.index];
+      var to = [node[0], node[1]];
+      var crossings = Solver.intersections(graph.links);
+      if (crossings > 0) {
+        node[0] = drag.from[0];
+        node[1] = drag.from[1];
+        rejectedMoves++;
+        document.getElementById('status').textContent = 'Move rejected: it created ' + crossings + ' crossing(s).';
+      } else if (Math.hypot(to[0] - drag.from[0], to[1] - drag.from[1]) > 0.001) {
+        moves.push({
+          vertex: drag.index,
+          from: drag.from,
+          to: to,
+          areaAfter: bounds(graph.nodes).area
+        });
+        document.getElementById('status').textContent = 'Accepted move of vertex ' + drag.index + '.';
+      }
+      drag = null;
+      render();
+    }
+
+    function createGraph() {
+      var count = parseInt(document.getElementById('num-nodes').value, 10) || 30;
+      graph = Solver.planarGraph(count);
+      Solver.intersections(graph.links);
+      initial = {
+        nodes: copyPositions(graph.nodes),
+        edges: graph.links.map(function(link) {
+          return [graph.nodes.indexOf(link[0]), graph.nodes.indexOf(link[1])];
+        })
+      };
+      moves = [];
+      rejectedMoves = 0;
+      consolidationState = null;
+      autoRunning = false;
+      document.getElementById('auto-run').textContent = 'Run Auto';
+      document.getElementById('auto-diagnosis').textContent = 'No compact target prepared.';
+      document.getElementById('status').textContent = 'Solved graph ready.';
+      render();
+    }
+
+    function restoreInitial() {
+      graph.nodes.forEach(function(node, index) {
+        node[0] = initial.nodes[index][0];
+        node[1] = initial.nodes[index][1];
+      });
+      moves = [];
+      rejectedMoves = 0;
+      consolidationState = null;
+      autoRunning = false;
+      document.getElementById('auto-run').textContent = 'Run Auto';
+      document.getElementById('auto-diagnosis').textContent = 'No compact target prepared.';
+      render();
+    }
+
+    function undo() {
+      var move = moves.pop();
+      if (!move) return;
+      graph.nodes[move.vertex][0] = move.from[0];
+      graph.nodes[move.vertex][1] = move.from[1];
+      render();
+    }
+
+    function demoPayload() {
+      return {
+        timestamp: new Date().toISOString(),
+        initial: initial,
+        moves: moves,
+        finalNodes: copyPositions(graph.nodes),
+        finalBounds: bounds(graph.nodes),
+        crossings: Solver.intersections(graph.links)
+      };
+    }
+
+    function writeDemo() {
+      var payload = demoPayload();
+      if (ipcRenderer && ipcRenderer.invoke) {
+        ipcRenderer.invoke('write-consolidation-demo', payload).then(function(path) {
+          document.getElementById('status').textContent = 'Wrote ' + path;
+        });
+        return;
+      }
+      if (typeof require !== 'undefined') {
+        var fs = require('fs');
+        var path = require('path');
+        var filePath = path.join(__dirname || '.', 'consolidation-demo.json');
+        fs.writeFileSync(filePath, JSON.stringify(payload, null, 2));
+        document.getElementById('status').textContent = 'Wrote ' + filePath;
+        return;
+      }
+      var blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
+      var url = URL.createObjectURL(blob);
+      var link = document.createElement('a');
+      link.href = url;
+      link.download = 'consolidation-demo.json';
+      link.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function prepareAuto() {
+      var factor = parseFloat(document.getElementById('factor').value) || 2.5;
+      consolidationState = Solver.createConsolidationState(graph, factor);
+      document.getElementById('auto-diagnosis').innerHTML =
+        '<div>Target: ' + factor.toFixed(1) + 'x shrink</div>' +
+        '<div>Scheduled axis moves: 0/' + (graph.nodes.length * 2) + '</div>';
+      render();
+    }
+
+    function autoStep() {
+      if (!consolidationState) prepareAuto();
+      var move = Solver.findDirectionalConsolidateMove(graph, consolidationState);
+      if (!move) {
+        autoRunning = false;
+        document.getElementById('auto-run').textContent = 'Run Auto';
+        document.getElementById('auto-diagnosis').innerHTML +=
+          '<div class="good">Complete. Final crossings: ' +
+          Solver.intersections(graph.links) + '</div>';
+        return false;
+      }
+
+      Solver.applyDirectionalConsolidateMove(graph, consolidationState, move);
+      var blockerText = move.blockers.slice(0, 5).map(function(blocker) {
+        return blocker.vertices.join('-') + (blocker.orthogonal ? ' orthogonal' : '');
+      }).join(', ') || 'none';
+      document.getElementById('auto-diagnosis').innerHTML =
+        '<div>Moved v' + move.nodeIndex + '</div>' +
+        '<div>Compression axis: ' + move.axis.toUpperCase() + '</div>' +
+        '<div>Crossings: ' + move.crossingsBefore + ' → ' + move.crossingsAfter + '</div>' +
+        '<div>Orthogonal blockers: ' + move.orthogonalBlockers + '</div>' +
+        '<div>Blocking edges: ' + blockerText + '</div>' +
+        '<div>Scheduled axis moves: ' + consolidationState.moves.length + '/' +
+          (graph.nodes.length * 2) + '</div>';
+      render();
+      return true;
+    }
+
+    function toggleAuto() {
+      autoRunning = !autoRunning;
+      document.getElementById('auto-run').textContent = autoRunning ? 'Stop Auto' : 'Run Auto';
+      function tick() {
+        if (!autoRunning) return;
+        if (autoStep()) setTimeout(tick, 180);
+      }
+      tick();
+    }
+
+    document.addEventListener('mousemove', moveDrag);
+    document.addEventListener('mouseup', endDrag);
+    document.getElementById('new-graph').addEventListener('click', createGraph);
+    document.getElementById('reset').addEventListener('click', restoreInitial);
+    document.getElementById('undo').addEventListener('click', undo);
+    document.getElementById('write-demo').addEventListener('click', writeDemo);
+    document.getElementById('prepare-auto').addEventListener('click', prepareAuto);
+    document.getElementById('auto-step').addEventListener('click', autoStep);
+    document.getElementById('auto-run').addEventListener('click', toggleAuto);
+    createGraph();
+  </script>
+</body>
+</html>

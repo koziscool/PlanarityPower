@@ -134,12 +134,18 @@
 
       <div class="section-label">Diagnosis</div>
       <div id="diagnosis" class="diagnosis">Analyze a graph to inspect its state.</div>
+
+      <div class="section-label">Stage 2</div>
+      <button id="btn-stage2-suggest">Find Stage 2 Restart</button>
+      <button id="btn-stage2-apply" disabled>Apply Suggestion</button>
+      <div id="stage2-diagnosis" class="diagnosis">No structural suggestion yet.</div>
       
       <div class="section-label">History</div>
       <div class="history-row">
         <button id="btn-back">&larr;</button>
         <button id="btn-forward">&rarr;</button>
       </div>
+      <button id="btn-write-history">Write Debug History</button>
       
       <div class="section-label">Speed</div>
       <input type="range" id="speed" min="1" max="100" value="50" style="width:100%">
@@ -176,6 +182,8 @@
     var solverStepCore = Solver.solverStep;
     var minimizeStepCore = Solver.minimizeStep;
     var analyzeGraphState = Solver.analyzeGraphState;
+    var suggestStage2Restart = Solver.suggestStage2Restart;
+    var applyStage2Suggestion = Solver.applyStage2Suggestion;
     var findClumps = Solver.findClumps;
     var findEscapeMove = Solver.findEscapeMove;
     var findCompactMove = Solver.findCompactMove;
@@ -214,6 +222,8 @@
       puzzle.count = intersections(puzzle.graph.links);
       puzzle.lastStrategy = state.strategy || '-';
       puzzle.movingNodeIndex = state.movingNode;
+      puzzle.stage2Suggestion = null;
+      updateStage2Diagnosis(puzzle, null);
       renderPuzzle(puzzle);
       return true;
     }
@@ -325,6 +335,8 @@
         var nodeIndex = graph.nodes.indexOf(move.node);
         puzzle.status = 'running';
         puzzle.escapeStuckCount = 0;
+        puzzle.stage2Suggestion = null;
+        updateStage2Diagnosis(puzzle, null);
         
         // The solver already applied the move, so we need to undo it for animation
         var toX = move.node[0];
@@ -364,6 +376,19 @@
       
       // Clear
       while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+      var suggestion = puzzle.stage2Suggestion;
+      if (suggestion && suggestion.triangle) {
+        var polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        polygon.setAttribute('points', suggestion.triangle.map(function(index) {
+          return scaleX(graph.nodes[index][0]) + ',' + scaleY(graph.nodes[index][1]);
+        }).join(' '));
+        polygon.setAttribute('fill', 'rgba(255, 0, 255, 0.08)');
+        polygon.setAttribute('stroke', '#f0f');
+        polygon.setAttribute('stroke-width', '2');
+        polygon.setAttribute('stroke-dasharray', '5 3');
+        svg.appendChild(polygon);
+      }
       
       // Edges
       graph.links.forEach(function(link) {
@@ -386,6 +411,9 @@
         // Determine state: moving, selected, or normal
         var isMoving = (i === puzzle.movingNodeIndex);
         var isSelected = (i === selectedNodeIndex);
+        var isTriangle = suggestion && suggestion.triangle &&
+          suggestion.triangle.indexOf(i) >= 0;
+        var isSuggestedComponent = suggestion && suggestion.component.indexOf(i) >= 0;
         
         if (isMoving) {
           circle.setAttribute('r', '4');
@@ -397,6 +425,16 @@
           circle.setAttribute('fill', node.intersection ? '#f0f' : '#0f0');
           circle.setAttribute('stroke', '#fff');
           circle.setAttribute('stroke-width', '1.5');
+        } else if (isTriangle) {
+          circle.setAttribute('r', '4');
+          circle.setAttribute('fill', '#f0f');
+          circle.setAttribute('stroke', '#600060');
+          circle.setAttribute('stroke-width', '1.5');
+        } else if (isSuggestedComponent) {
+          circle.setAttribute('r', '3.5');
+          circle.setAttribute('fill', '#f66');
+          circle.setAttribute('stroke', '#900');
+          circle.setAttribute('stroke-width', '1');
         } else {
           circle.setAttribute('r', '2.5');
           circle.setAttribute('fill', node.intersection ? '#0cf' : '#fc0');
@@ -423,6 +461,21 @@
         
         svg.appendChild(circle);
       });
+
+      if (suggestion) {
+        suggestion.positions.forEach(function(position) {
+          var ghost = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          ghost.setAttribute('cx', scaleX(position.x));
+          ghost.setAttribute('cy', scaleY(position.y));
+          ghost.setAttribute('r', '3');
+          ghost.setAttribute('fill', 'none');
+          ghost.setAttribute('stroke', '#0a0');
+          ghost.setAttribute('stroke-width', '1');
+          ghost.setAttribute('stroke-dasharray', '2 2');
+          ghost.setAttribute('pointer-events', 'none');
+          svg.appendChild(ghost);
+        });
+      }
       
       // Draw vertex numbers if enabled
       var showNumbers = document.getElementById('show-numbers') && document.getElementById('show-numbers').checked;
@@ -583,10 +636,7 @@
       if (ipcRenderer) {
         ipcRenderer.send('state-update', state);
         console.log('State sent via IPC');
-      }
-      
-      // Also write to file as backup
-      if (typeof require !== 'undefined') {
+      } else if (typeof require !== 'undefined') {
         try {
           var fs = require('fs');
           var path = require('path');
@@ -595,6 +645,8 @@
         } catch(e) {
           console.log('Could not save state file:', e.message);
         }
+      } else {
+        postStateServer('/state', state);
       }
     }
     
@@ -630,10 +682,7 @@
       if (ipcRenderer) {
         ipcRenderer.send('history-reset');
         ipcRenderer.send('move-log', entry);
-      }
-      
-      // Also write to file (backup)
-      if (typeof require !== 'undefined') {
+      } else if (typeof require !== 'undefined') {
         try {
           var fs = require('fs');
           var filePath = getHistoryFilePath();
@@ -642,6 +691,10 @@
         } catch(e) {
           console.log('Could not log initial state to file:', e.message);
         }
+      } else {
+        postStateServer('/history/reset', {}).then(function() {
+          return postStateServer('/history/move', entry);
+        });
       }
       
       console.log('Initial state logged:', entry.nodes.length, 'nodes,', entry.edges.length, 'edges,', entry.crossings, 'crossings');
@@ -665,10 +718,7 @@
       // Send via IPC (primary)
       if (ipcRenderer) {
         ipcRenderer.send('move-log', entry);
-      }
-      
-      // Also write to file (backup)
-      if (typeof require !== 'undefined') {
+      } else if (typeof require !== 'undefined') {
         try {
           var fs = require('fs');
           var filePath = getHistoryFilePath();
@@ -676,6 +726,8 @@
         } catch(e) {
           console.log('Could not log move to file:', e.message);
         }
+      } else {
+        postStateServer('/history/move', entry);
       }
       
       console.log('Move logged:', entry);
@@ -684,6 +736,61 @@
     // Legacy wrapper for compatibility
     function logMoveHistory(moveNum, vertexIdx, fromX, fromY, toX, toY, crossingsBefore, crossingsAfter, source) {
       logMove(moveNum, vertexIdx, toX, toY, crossingsAfter, source, null);
+    }
+
+    function postStateServer(endpoint, payload) {
+      return fetch('http://127.0.0.1:9876' + endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }).then(function(response) {
+        if (!response.ok) throw new Error('State server returned ' + response.status);
+        return response.json();
+      }).catch(function(error) {
+        console.warn('State server unavailable for ' + endpoint + ':', error.message);
+        return null;
+      });
+    }
+
+    function buildDebugHistory(puzzle) {
+      return {
+        timestamp: new Date().toISOString(),
+        session: sessionId,
+        moves: puzzle.moves,
+        crossings: puzzle.count,
+        currentPosition: puzzle.historyIndex,
+        selectedVertex: selectedNodeIndex,
+        nodes: puzzle.graph.nodes.map(function(node) { return [node[0], node[1]]; }),
+        edges: puzzle.graph.links.map(function(link) {
+          return [puzzle.graph.nodes.indexOf(link[0]), puzzle.graph.nodes.indexOf(link[1])];
+        }),
+        history: puzzle.history
+      };
+    }
+
+    function writeDebugHistory(puzzle) {
+      var payload = buildDebugHistory(puzzle);
+      if (ipcRenderer && ipcRenderer.invoke) {
+        return ipcRenderer.invoke('write-debug-history', payload);
+      }
+      if (typeof require !== 'undefined') {
+        var fs = require('fs');
+        var path = require('path');
+        var filePath = path.join(__dirname || '.', 'interactive-history.json');
+        fs.writeFileSync(filePath, JSON.stringify(payload, null, 2));
+        return Promise.resolve(filePath);
+      }
+      return postStateServer('/debug-history', payload).then(function(result) {
+        if (result) return result.path;
+        var blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'interactive-history.json';
+        a.click();
+        URL.revokeObjectURL(url);
+        return 'downloaded interactive-history.json (state server unavailable)';
+      });
     }
     
     // ============ DRAG AND DROP ============
@@ -816,6 +923,8 @@
         puzzle.solverState.stuckCount = 0;
       }
       puzzle.status = 'running';
+      puzzle.stage2Suggestion = null;
+      updateStage2Diagnosis(puzzle, null);
       
       // Log the move for analysis
       var crossingsBefore = (puzzle.history && puzzle.history[puzzle.historyIndex]) 
@@ -897,11 +1006,13 @@
           stuckCount: 0,
           history: [],
           historyIndex: -1,
-          movingNodeIndex: -1
+          movingNodeIndex: -1,
+          stage2Suggestion: null
         };
         puzzles.push(puzzle);
         puzzle.count = intersections(graph.links);
         selectedNodeIndex = -1;
+        updateStage2Diagnosis(puzzle, null);
         
         // Generate new session ID and log initial state
         sessionId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -1011,6 +1122,44 @@
 
       return analysis;
     }
+
+    function updateStage2Diagnosis(puzzle, report) {
+      var box = document.getElementById('stage2-diagnosis');
+      var applyButton = document.getElementById('btn-stage2-apply');
+      var suggestion = puzzle && puzzle.stage2Suggestion;
+      applyButton.disabled = !suggestion;
+
+      if (!report && !suggestion) {
+        box.textContent = 'No structural suggestion yet.';
+        return;
+      }
+      if (!suggestion) {
+        var lowDegreeText = (report.lowDegreeCandidates || []).map(function(item) {
+          return 'v' + item.vertex + '(d' + item.degree + ',c' + item.crossings + ')';
+        }).join(', ') || 'none';
+        box.innerHTML =
+          '<div>Candidate vertices: [' + (report.candidateVertices || []).join(', ') + ']</div>' +
+          '<div>Low-degree outliers: ' + lowDegreeText + '</div>' +
+          '<div>Generated/tested: ' + report.candidatesGenerated + '/' +
+            report.candidatesTested + '</div>' +
+          '<div>Time: ' + report.elapsedMs + '/' + report.timeBudgetMs + ' ms' +
+            (report.timedOut ? ' (budget reached)' : '') + '</div>' +
+          '<div class="warning">No bounded restart unlocked enough progress.</div>';
+        return;
+      }
+
+      box.innerHTML =
+        '<div>Strategy: ' + suggestion.strategy + '</div>' +
+        '<div>Move: [' + suggestion.component.join(', ') + ']</div>' +
+        '<div>Reason: ' + suggestion.reason + '</div>' +
+        '<div>Immediate crossings: ' + suggestion.immediateCrossings +
+          ' (+' + suggestion.immediateDamage + ' damage)</div>' +
+        '<div class="good">After simulated Stage 1: ' + suggestion.finalCrossings +
+          ' (-' + suggestion.downstreamImprovement + ')</div>' +
+        '<div>Clean vertex delta: ' +
+          (suggestion.cleanDelta >= 0 ? '+' : '') + suggestion.cleanDelta + '</div>' +
+        '<div>Simulation steps: ' + suggestion.simulationSteps + '</div>';
+    }
     
     function updateGlobalStats() {
       puzzles.forEach(function(p) {
@@ -1076,6 +1225,47 @@
         executeStep(puzzles[0], function() { updateStatus(); }, true);
       }
     });
+
+    document.getElementById('btn-stage2-suggest').addEventListener('click', function() {
+      if (puzzles.length === 0 || running) return;
+      var puzzle = puzzles[0];
+      var button = document.getElementById('btn-stage2-suggest');
+      button.disabled = true;
+      button.textContent = 'Analyzing...';
+
+      setTimeout(function() {
+        var report = suggestStage2Restart(puzzle.graph);
+        puzzle.stage2Report = report;
+        puzzle.stage2Suggestion = report.best;
+        updateStage2Diagnosis(puzzle, report);
+        renderPuzzle(puzzle);
+        console.log('Stage 2 suggestion report:', report);
+        button.disabled = false;
+        button.textContent = 'Find Stage 2 Restart';
+      }, 0);
+    });
+
+    document.getElementById('btn-stage2-apply').addEventListener('click', function() {
+      if (puzzles.length === 0) return;
+      var puzzle = puzzles[0];
+      if (!puzzle.stage2Suggestion) return;
+
+      var before = intersections(puzzle.graph.links);
+      if (!applyStage2Suggestion(puzzle.graph, puzzle.stage2Suggestion)) return;
+      var after = intersections(puzzle.graph.links);
+      puzzle.moves++;
+      puzzle.lastStrategy = puzzle.stage2Suggestion.strategy;
+      puzzle.status = 'running';
+      puzzle.solverState = {};
+      puzzle.stage2Suggestion = null;
+      puzzle.stage2Report = null;
+      puzzle.count = after;
+      saveState(puzzle);
+      updateStage2Diagnosis(puzzle, null);
+      renderPuzzle(puzzle);
+      updateStatus();
+      console.log('Applied Stage 2 suggestion:', before + ' -> ' + after + ' immediate crossings');
+    });
     
     // Run/Pause button
     document.getElementById('btn-run').addEventListener('click', start);
@@ -1085,6 +1275,8 @@
       if (puzzles.length === 0) return;
       var puzzle = puzzles[0];
       var graph = puzzle.graph;
+      puzzle.stage2Suggestion = null;
+      updateStage2Diagnosis(puzzle, null);
       var movesApplied = 0;
       var maxMoves = 50;  // limit to prevent infinite loops
       
@@ -1115,6 +1307,8 @@
       if (puzzles.length === 0) return;
       var puzzle = puzzles[0];
       var graph = puzzle.graph;
+      puzzle.stage2Suggestion = null;
+      updateStage2Diagnosis(puzzle, null);
       var movesApplied = 0;
       var maxMoves = 50;
       
@@ -1143,6 +1337,20 @@
     });
     document.getElementById('btn-forward').addEventListener('click', function() {
       if (puzzles.length > 0) goForward(puzzles[0]);
+    });
+    document.getElementById('btn-write-history').addEventListener('click', function() {
+      if (puzzles.length === 0) return;
+      var button = document.getElementById('btn-write-history');
+      button.disabled = true;
+      writeDebugHistory(puzzles[0]).then(function(destination) {
+        document.getElementById('status').textContent = 'Debug history written: ' + destination;
+        console.log('Debug history written:', destination);
+      }).catch(function(error) {
+        document.getElementById('status').textContent = 'Could not write debug history: ' + error.message;
+        console.error('Could not write debug history:', error);
+      }).then(function() {
+        button.disabled = false;
+      });
     });
     
     // Vertex numbering toggle

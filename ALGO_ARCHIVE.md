@@ -111,6 +111,24 @@ The experimental `findBarrierMove()` remains exported for direct testing but is
 not called by the default solver loop. Its exhaustive two-vertex search caused
 severe stalls and is not yet a justified structural operation.
 
+The first separating-triangle slice uses `findSeparatingTriangles()` and
+`suggestStage2Move()`. It is retained as Stage 3 diagnostic work, but it was too
+narrow to serve as the primary Stage 2 restart mechanism.
+
+The active suggestion-only Stage 2 slice uses `suggestStage2Restart()`. It
+examines at most three crossing-heavy vertices, generates at most eight direct
+edge-crossing jumps or translations of both endpoints of a directly crossing
+edge, and evaluates each with at most eight deterministic simulated Stage 1
+moves under a 75 ms wall-clock budget. Interactive previews a strictly
+productive bounded restart before the user explicitly applies it.
+
+Low-degree local enclosure candidates now run before the incidence-based
+fallback. For conflicting degree-3-to-5 vertices, Stage 2 tests placement inside
+triangles formed by mutually adjacent neighbors and side flips across
+neighbor-neighbor edges when the vertex lies opposite most remaining neighbors.
+These candidates matched the visually obvious "outlying vertex belongs on the
+other side" pattern substantially more often than high-incidence targeting.
+
 - `CORE GRAPH FUNCTIONS` - intersection detection, graph generation
 - `ANCHOR SCORING` - determines how "fixed" a vertex is  
 - `INCREMENTAL CROSSING DETECTION` - fast move evaluation

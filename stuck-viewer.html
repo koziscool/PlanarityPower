@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Stuck Point Viewer</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background: #1a1a2e;
+      color: #eee;
+    }
+    h1 {
+      text-align: center;
+      margin-bottom: 10px;
+    }
+    .controls {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    .controls select, .controls button {
+      padding: 8px 16px;
+      font-size: 14px;
+      margin: 0 5px;
+    }
+    .stats {
+      text-align: center;
+      margin-bottom: 20px;
+      color: #aaa;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 20px;
+      padding: 0 20px;
+    }
+    .graph-card {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 12px;
+      cursor: pointer;
+      transition: transform 0.1s;
+    }
+    .graph-card:hover {
+      transform: scale(1.02);
+    }
+    .graph-card.selected {
+      outline: 3px solid #4ecca3;
+    }
+    .graph-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+    .graph-id {
+      font-weight: bold;
+      color: #4ecca3;
+    }
+    .graph-stats {
+      color: #888;
+    }
+    .graph-svg {
+      width: 100%;
+      height: auto;
+      background: #fff;
+      border-radius: 4px;
+    }
+    .detail-panel {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: 400px;
+      height: 100vh;
+      background: #16213e;
+      padding: 20px;
+      overflow-y: auto;
+      transform: translateX(100%);
+      transition: transform 0.2s;
+      box-shadow: -5px 0 20px rgba(0,0,0,0.5);
+    }
+    .detail-panel.open {
+      transform: translateX(0);
+    }
+    .detail-panel h2 {
+      margin-top: 0;
+      color: #4ecca3;
+    }
+    .detail-panel .close-btn {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: none;
+      border: none;
+      color: #888;
+      font-size: 24px;
+      cursor: pointer;
+    }
+    .detail-section {
+      margin-bottom: 20px;
+    }
+    .detail-section h3 {
+      color: #aaa;
+      font-size: 14px;
+      margin-bottom: 10px;
+      border-bottom: 1px solid #333;
+      padding-bottom: 5px;
+    }
+    .detail-list {
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .detail-list .yellow { color: #ffd93d; }
+    .detail-list .red { color: #ff6b6b; }
+    .detail-list .anchor-low { color: #4ecca3; }
+    .detail-list .anchor-high { color: #ff9f43; }
+  </style>
+</head>
+<body>
+  <h1>Stuck Point Viewer</h1>
+  
+  <div class="controls">
+    <select id="dataFile">
+      <option value="stuck-data-20v.jsonl">20 vertices</option>
+      <option value="stuck-data-25v.jsonl">25 vertices</option>
+      <option value="stuck-data-30v.jsonl" selected>30 vertices</option>
+    </select>
+    <button onclick="loadData()">Load</button>
+  </div>
+  
+  <div class="stats" id="stats"></div>
+  
+  <div class="grid" id="grid"></div>
+  
+  <div class="detail-panel" id="detailPanel">
+    <button class="close-btn" onclick="closeDetail()">&times;</button>
+    <div id="detailContent"></div>
+  </div>
+
+  <script>
+    var snapshots = [];
+    var selectedIdx = -1;
+    
+    function loadData() {
+      var file = document.getElementById('dataFile').value;
+      fetch(file)
+        .then(r => r.text())
+        .then(text => {
+          snapshots = text.trim().split('\n').map(line => JSON.parse(line));
+          renderGrid();
+          updateStats();
+        })
+        .catch(err => {
+          alert('Error loading ' + file + ': ' + err.message);
+        });
+    }
+    
+    function updateStats() {
+      var avgCrossings = snapshots.reduce((a, s) => a + s.currentCrossings, 0) / snapshots.length;
+      var avgYellow = snapshots.reduce((a, s) => a + s.yellowCount, 0) / snapshots.length;
+      var avgMoves = snapshots.reduce((a, s) => a + s.moves, 0) / snapshots.length;
+      
+      document.getElementById('stats').innerHTML = 
+        snapshots.length + ' stuck points | ' +
+        'Avg crossings: ' + avgCrossings.toFixed(1) + ' | ' +
+        'Avg yellow: ' + avgYellow.toFixed(1) + ' | ' +
+        'Avg moves: ' + avgMoves.toFixed(1);
+    }
+    
+    function renderGrid() {
+      var grid = document.getElementById('grid');
+      grid.innerHTML = '';
+      
+      snapshots.forEach(function(snap, idx) {
+        var card = document.createElement('div');
+        card.className = 'graph-card';
+        card.onclick = function() { showDetail(idx); };
+        
+        var header = document.createElement('div');
+        header.className = 'graph-header';
+        header.innerHTML = 
+          '<span class="graph-id">Graph #' + idx + '</span>' +
+          '<span class="graph-stats">' + snap.currentCrossings + ' crossings, ' + 
+          snap.yellowCount + ' yellow, ' + snap.moves + ' moves</span>';
+        
+        var svg = renderGraph(snap, 380, 380, true);
+        svg.classList.add('graph-svg');
+        
+        card.appendChild(header);
+        card.appendChild(svg);
+        grid.appendChild(card);
+      });
+    }
+    
+    function renderGraph(snap, width, height, showLabels) {
+      var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('viewBox', '0 0 400 400');
+      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+      
+      var pad = 20;
+      var size = 400 - 2 * pad;
+      
+      // Draw edges
+      snap.edges.forEach(function(edge) {
+        var src = snap.nodes[edge.src];
+        var tgt = snap.nodes[edge.tgt];
+        var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', pad + src.x * size);
+        line.setAttribute('y1', pad + src.y * size);
+        line.setAttribute('x2', pad + tgt.x * size);
+        line.setAttribute('y2', pad + tgt.y * size);
+        line.setAttribute('stroke', edge.hasCrossing ? '#000' : '#fc0');
+        line.setAttribute('stroke-width', 1);
+        svg.appendChild(line);
+      });
+      
+      // Draw nodes
+      snap.nodes.forEach(function(node, i) {
+        var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        
+        var circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', pad + node.x * size);
+        circle.setAttribute('cy', pad + node.y * size);
+        circle.setAttribute('r', showLabels ? 4 : 3);
+        circle.setAttribute('fill', node.yellow ? '#fc0' : '#0cf');
+        circle.setAttribute('stroke', '#000');
+        circle.setAttribute('stroke-width', '0.5');
+        g.appendChild(circle);
+        
+        if (showLabels) {
+          var text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          text.setAttribute('x', pad + node.x * size + 6);
+          text.setAttribute('y', pad + node.y * size - 4);
+          text.setAttribute('text-anchor', 'start');
+          text.setAttribute('font-size', '9');
+          text.setAttribute('fill', '#333');
+          text.textContent = i;
+          g.appendChild(text);
+        }
+        
+        svg.appendChild(g);
+      });
+      
+      return svg;
+    }
+    
+    function showDetail(idx) {
+      selectedIdx = idx;
+      var snap = snapshots[idx];
+      
+      // Highlight selected card
+      document.querySelectorAll('.graph-card').forEach((c, i) => {
+        c.classList.toggle('selected', i === idx);
+      });
+      
+      var panel = document.getElementById('detailPanel');
+      var content = document.getElementById('detailContent');
+      
+      // Large graph
+      var svg = renderGraph(snap, 360, 360, true);
+      
+      // Find problem vertices (non-yellow, low anchor)
+      var problems = snap.nodes
+        .filter(n => !n.yellow)
+        .map(n => ({ idx: n.idx, anchor: snap.anchorScores[n.idx], degree: n.degree }))
+        .sort((a, b) => a.anchor - b.anchor);
+      
+      // Find crossing pairs
+      var crossingInfo = snap.crossingPairs.map(function(pair) {
+        var e1 = snap.edges[pair[0]];
+        var e2 = snap.edges[pair[1]];
+        return {
+          edge1: e1.src + '-' + e1.tgt,
+          edge2: e2.src + '-' + e2.tgt,
+          vertices: [e1.src, e1.tgt, e2.src, e2.tgt]
+        };
+      });
+      
+      // Find candidate pairs (neighbors, low anchor, in crossing)
+      var candidatePairs = [];
+      crossingInfo.forEach(function(ci) {
+        var verts = ci.vertices;
+        for (var a = 0; a < verts.length; a++) {
+          for (var b = a + 1; b < verts.length; b++) {
+            var v1 = verts[a], v2 = verts[b];
+            var n1 = snap.nodes[v1], n2 = snap.nodes[v2];
+            if (snap.anchorScores[v1] < 0.4 && snap.anchorScores[v2] < 0.4 &&
+                n1.neighbors.includes(v2)) {
+              candidatePairs.push({
+                v1: v1, v2: v2,
+                a1: snap.anchorScores[v1].toFixed(2),
+                a2: snap.anchorScores[v2].toFixed(2)
+              });
+            }
+          }
+        }
+      });
+      
+      content.innerHTML = '<h2>Graph #' + idx + '</h2>';
+      content.appendChild(svg);
+      
+      content.innerHTML += 
+        '<div class="detail-section">' +
+        '<h3>Overview</h3>' +
+        '<div class="detail-list">' +
+        'Vertices: ' + snap.vertexCount + '<br>' +
+        'Edges: ' + snap.edgeCount + '<br>' +
+        'Moves to stuck: ' + snap.moves + '<br>' +
+        'Initial crossings: ' + snap.initialCrossings + '<br>' +
+        'Current crossings: <span class="red">' + snap.currentCrossings + '</span><br>' +
+        'Yellow vertices: <span class="yellow">' + snap.yellowCount + '</span><br>' +
+        'Clumps: ' + snap.clumpCount + ' (' + snap.clumpSizes.join(', ') + ')' +
+        '</div></div>';
+      
+      content.innerHTML +=
+        '<div class="detail-section">' +
+        '<h3>Problem Vertices (non-yellow, sorted by anchor)</h3>' +
+        '<div class="detail-list">' +
+        problems.map(p => 
+          '<span class="anchor-low">v' + p.idx + '</span>: anchor=' + p.anchor.toFixed(2) + ', degree=' + p.degree
+        ).join('<br>') +
+        '</div></div>';
+      
+      content.innerHTML +=
+        '<div class="detail-section">' +
+        '<h3>Crossing Edges (' + crossingInfo.length + ')</h3>' +
+        '<div class="detail-list">' +
+        crossingInfo.map(ci => ci.edge1 + ' × ' + ci.edge2).join('<br>') +
+        '</div></div>';
+      
+      if (candidatePairs.length > 0) {
+        content.innerHTML +=
+          '<div class="detail-section">' +
+          '<h3>Candidate Pairs (neighbors, low anchor, in crossing)</h3>' +
+          '<div class="detail-list">' +
+          candidatePairs.slice(0, 10).map(cp => 
+            'v' + cp.v1 + ' (a=' + cp.a1 + ') + v' + cp.v2 + ' (a=' + cp.a2 + ')'
+          ).join('<br>') +
+          (candidatePairs.length > 10 ? '<br>... +' + (candidatePairs.length - 10) + ' more' : '') +
+          '</div></div>';
+      }
+      
+      panel.classList.add('open');
+    }
+    
+    function closeDetail() {
+      document.getElementById('detailPanel').classList.remove('open');
+      document.querySelectorAll('.graph-card').forEach(c => c.classList.remove('selected'));
+      selectedIdx = -1;
+    }
+    
+    // Load default on page load
+    window.onload = loadData;
+  </script>
+</body>
+</html>

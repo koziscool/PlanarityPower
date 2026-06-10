@@ -9,21 +9,11 @@
 //   Browser: <script src="solver.js"> → access via window.Solver
 //   Node.js: const solver = require('./solver.js')
 //
-// FILE STRUCTURE:
-//   Lines ~10-80:    Core graph functions (cross, intersect, intersections, etc.)
-//   Lines ~80-180:   Anchor scoring and weighted centroid
-//   Lines ~180-250:  Incremental crossing detection (fast evaluation)
-//   Lines ~250-550:  Fast strategies (findBestMoveFast, findBottleneckMoveFast)
-//   Lines ~550-650:  Slower reference strategies (findBestMove, findBottleneckMove)
-//   Lines ~650-920:  Finisher and grid strategies (late game)
-//   Lines ~920-1140: Unblock strategy (experimental, not in main loop)
-//   Lines ~1140-1470: Compact/Relocate/Consolidate (manual-only buttons)
-//   Lines ~1470-1600: Escape strategy (last resort)
-//   Lines ~1600-2040: Edge-side and triangle strategies (experimental)
-//   Lines ~2040-2220: Oscillation detection and main solver loop
-//   Lines ~2220-2470: Clump detection and grow-clump strategy
-//   Lines ~2470-2760: Interactive strategies (centroid, local, uncross, wiggle)
-//   Lines ~2760-2800: Exports
+// ACTIVE SURFACES:
+//   interactive.html: lead human-in-the-loop workflow
+//   solver.html: batch visual evaluator using the same solverStep()
+//   index.html: original game with discrete move tools
+//   benchmark.js: headless evaluator using the same solverStep()
 //
 // =============================================================================
 
@@ -128,7 +118,7 @@
   
   // anchorScore(graph, node): Returns 0-1 score of how anchored a vertex is
   // Factors: (1) fraction of yellow neighbors, (2) angular spread, (3) neighbor degree
-  // Used by: findEscapeMove (prefer low-anchor vertices), findUnblockMove
+  // Used by: findEscapeMove (prefer low-anchor vertices)
   function anchorScore(graph, node) {
     var neighbors = getNeighbors(graph, node);
     if (neighbors.length === 0) return 0;
@@ -467,235 +457,33 @@
     return bestMove;
   }
   
-  // ============ CROSSING COUNT PER VERTEX ============
-  
+  // Which side of an oriented edge is a point on?
+  function sideOfEdge(edge, point) {
+    return cross(
+      [edge[1][0] - edge[0][0], edge[1][1] - edge[0][1]],
+      [point[0] - edge[0][0], point[1] - edge[0][1]]
+    );
+  }
+
+  // Count how many crossings involve each vertex.
   function getCrossingCounts(graph) {
-    var counts = [];
+    var counts = graph.nodes.map(function() { return 0; });
     var links = graph.links;
-    
-    for (var i = 0; i < graph.nodes.length; i++) {
-      counts[i] = 0;
-    }
-    
+
     for (var i = 0; i < links.length; i++) {
       for (var j = i + 1; j < links.length; j++) {
-        if (intersect(links[i], links[j])) {
-          var a0 = graph.nodes.indexOf(links[i][0]);
-          var a1 = graph.nodes.indexOf(links[i][1]);
-          var b0 = graph.nodes.indexOf(links[j][0]);
-          var b1 = graph.nodes.indexOf(links[j][1]);
-          counts[a0]++;
-          counts[a1]++;
-          counts[b0]++;
-          counts[b1]++;
-        }
+        if (!intersect(links[i], links[j])) continue;
+
+        counts[graph.nodes.indexOf(links[i][0])]++;
+        counts[graph.nodes.indexOf(links[i][1])]++;
+        counts[graph.nodes.indexOf(links[j][0])]++;
+        counts[graph.nodes.indexOf(links[j][1])]++;
       }
     }
-    
+
     return counts;
   }
-  
-  // ============ BOTTLENECK MOVE ============
-  // Find vertices with high crossingCount relative to degree and move them
-  
-  function findBottleneckMove(graph, samplesPerNode) {
-    samplesPerNode = samplesPerNode || 20;
-    var count = intersections(graph.links);
-    if (count === 0) return null;
-    
-    var crossingCounts = getCrossingCounts(graph);
-    
-    // Score each vertex: crossingCount / (neighborCount + 1)
-    // Higher score = more "bottlenecky" - causing many crossings for its degree
-    var scored = graph.nodes.map(function(node, i) {
-      var neighbors = getNeighbors(graph, node);
-      var cc = crossingCounts[i];
-      var score = cc / (neighbors.length + 1);
-      return { node: node, index: i, crossingCount: cc, neighborCount: neighbors.length, score: score };
-    });
-    
-    // Sort by score descending - prioritize worst bottlenecks
-    scored.sort(function(a, b) { return b.score - a.score; });
-    
-    var bestMove = null;
-    var bestImprovement = 0;
-    
-    // Focus on top bottlenecks (top 30% or at least 5)
-    var numToCheck = Math.max(5, Math.floor(graph.nodes.length * 0.3));
-    
-    for (var si = 0; si < Math.min(numToCheck, scored.length); si++) {
-      var item = scored[si];
-      if (item.crossingCount === 0) continue;
-      
-      var node = item.node;
-      var i = item.index;
-      var origX = node[0], origY = node[1];
-      var neighbors = getNeighbors(graph, node);
-      
-      // Strategy 1: Move to neighbor centroid (usually very effective for bottlenecks)
-      if (neighbors.length > 0) {
-        var cx = 0, cy = 0;
-        neighbors.forEach(function(n) { cx += n[0]; cy += n[1]; });
-        cx /= neighbors.length;
-        cy /= neighbors.length;
-        cx = Math.max(0.02, Math.min(0.98, cx));
-        cy = Math.max(0.02, Math.min(0.98, cy));
-        
-        if (!isTooClose(graph, node, cx, cy)) {
-          node[0] = cx;
-          node[1] = cy;
-          
-          var newCount = intersections(graph.links);
-          var improvement = count - newCount;
-          
-          if (improvement > bestImprovement) {
-            bestImprovement = improvement;
-            bestMove = {
-              node: node,
-              nodeIndex: i,
-              fromX: origX,
-              fromY: origY,
-              toX: cx,
-              toY: cy,
-              improvement: improvement,
-              strategy: 'bottleneck-centroid'
-            };
-          }
-          
-          node[0] = origX;
-          node[1] = origY;
-        }
-      }
-      
-      // Strategy 2: Sample positions biased toward graph center
-      for (var s = 0; s < samplesPerNode; s++) {
-        // Bias toward center (0.3-0.7 range more likely)
-        var newX = 0.15 + Math.random() * 0.7;
-        var newY = 0.15 + Math.random() * 0.7;
-        
-        if (isTooClose(graph, node, newX, newY)) continue;
-        
-        node[0] = newX;
-        node[1] = newY;
-        
-        var newCount = intersections(graph.links);
-        var improvement = count - newCount;
-        
-        if (improvement > bestImprovement) {
-          bestImprovement = improvement;
-          bestMove = {
-            node: node,
-            nodeIndex: i,
-            fromX: origX,
-            fromY: origY,
-            toX: newX,
-            toY: newY,
-            improvement: improvement,
-            strategy: 'bottleneck-sample'
-          };
-        }
-        
-        node[0] = origX;
-        node[1] = origY;
-      }
-    }
-    
-    intersections(graph.links);
-    return bestMove;
-  }
-  
-  // ============ WIDE GREEDY SOLVER ============
-  // Try many random positions for each node, pick the one that reduces crossings most
-  
-  function findBestMove(graph, samplesPerNode) {
-    samplesPerNode = samplesPerNode || 30;
-    var count = intersections(graph.links);
-    if (count === 0) return null;
-    
-    var bestMove = null;
-    var bestImprovement = 0;
-    
-    // Consider ALL nodes, not just intersecting ones
-    graph.nodes.forEach(function(node, i) {
-      var origX = node[0], origY = node[1];
-      
-      // Sample random positions
-      for (var s = 0; s < samplesPerNode; s++) {
-        var newX = 0.02 + Math.random() * 0.96;
-        var newY = 0.02 + Math.random() * 0.96;
-        
-        // Skip if too close to another node
-        if (isTooClose(graph, node, newX, newY)) continue;
-        
-        node[0] = newX;
-        node[1] = newY;
-        
-        var newCount = intersections(graph.links);
-        var improvement = count - newCount;
-        
-        if (improvement > bestImprovement) {
-          bestImprovement = improvement;
-          bestMove = {
-            node: node,
-            nodeIndex: i,
-            fromX: origX,
-            fromY: origY,
-            toX: node[0],
-            toY: node[1],
-            improvement: improvement,
-            strategy: 'random'
-          };
-        }
-      }
-      
-      // Also try neighbor centroid
-      var neighbors = getNeighbors(graph, node);
-      if (neighbors.length > 0) {
-        var cx = 0, cy = 0;
-        neighbors.forEach(function(n) { cx += n[0]; cy += n[1]; });
-        cx /= neighbors.length;
-        cy /= neighbors.length;
-        
-        cx = Math.max(0.02, Math.min(0.98, cx));
-        cy = Math.max(0.02, Math.min(0.98, cy));
-        
-        // Skip if too close to another node
-        if (isTooClose(graph, node, cx, cy)) {
-          node[0] = origX;
-          node[1] = origY;
-          return;
-        }
-        
-        node[0] = cx;
-        node[1] = cy;
-        
-        var newCount = intersections(graph.links);
-        var improvement = count - newCount;
-        
-        if (improvement > bestImprovement) {
-          bestImprovement = improvement;
-          bestMove = {
-            node: node,
-            nodeIndex: i,
-            fromX: origX,
-            fromY: origY,
-            toX: node[0],
-            toY: node[1],
-            improvement: improvement,
-            strategy: 'centroid'
-          };
-        }
-      }
-      
-      // Restore
-      node[0] = origX;
-      node[1] = origY;
-    });
-    
-    intersections(graph.links);
-    return bestMove;
-  }
-  
+
   // Finisher strategy - when very close to solved, exhaustively find the exact solution
   // For each crossing, identify exactly which vertex move would resolve it
   function findFinisherMove(graph) {
@@ -995,208 +783,6 @@
   
   // Unblock strategy: when stuck on a vertex, try moving its neighbors/blockers instead
   // Sometimes the solution is to move OTHER vertices to create space
-  function findUnblockMove(graph, state) {
-    var count = intersections(graph.links);
-    if (count === 0) return null;
-    
-    state = state || {};
-    state.recentAttempts = state.recentAttempts || {};
-    
-    // Find vertices that have been attempted many times (stuck vertices)
-    var stuckVertices = [];
-    for (var idx in state.recentAttempts) {
-      if (state.recentAttempts[idx] >= 2) {  // lowered from 3 - trigger faster
-        stuckVertices.push(parseInt(idx));
-      }
-    }
-    
-    if (stuckVertices.length === 0) return null;
-    
-    // For each stuck vertex, try moving its neighbors or connected vertices
-    for (var si = 0; si < stuckVertices.length; si++) {
-      var stuckIdx = stuckVertices[si];
-      var stuckNode = graph.nodes[stuckIdx];
-      if (!stuckNode) continue;
-      
-      var neighbors = getNeighbors(graph, stuckNode);
-      
-      // Find low-anchor neighbors that might be blocking
-      var moveableNeighbors = [];
-      for (var ni = 0; ni < neighbors.length; ni++) {
-        var neighbor = neighbors[ni];
-        var neighborIdx = graph.nodes.indexOf(neighbor);
-        var anchor = anchorScore(graph, neighbor);
-        if (anchor < 0.5) {
-          moveableNeighbors.push({ node: neighbor, idx: neighborIdx, anchor: anchor });
-        }
-      }
-      
-      // Sort by lowest anchor (easiest to move)
-      moveableNeighbors.sort(function(a, b) { return a.anchor - b.anchor; });
-      
-      // Try moving pairs of connected low-anchor neighbors together
-      for (var i = 0; i < moveableNeighbors.length; i++) {
-        for (var j = i + 1; j < moveableNeighbors.length; j++) {
-          var n1 = moveableNeighbors[i];
-          var n2 = moveableNeighbors[j];
-          
-          // Check if these two are connected to each other
-          var connected = getNeighbors(graph, n1.node).indexOf(n2.node) >= 0;
-          
-          var orig1 = [n1.node[0], n1.node[1]];
-          var orig2 = [n2.node[0], n2.node[1]];
-          
-          // Try moving both toward a common target area
-          // Use the centroid of their combined neighbors as target
-          var allNeighbors = getNeighbors(graph, n1.node).concat(getNeighbors(graph, n2.node));
-          var uniqueNeighbors = [];
-          for (var k = 0; k < allNeighbors.length; k++) {
-            if (uniqueNeighbors.indexOf(allNeighbors[k]) === -1 && 
-                allNeighbors[k] !== n1.node && allNeighbors[k] !== n2.node) {
-              uniqueNeighbors.push(allNeighbors[k]);
-            }
-          }
-          
-          if (uniqueNeighbors.length === 0) continue;
-          
-          var targetCentroid = centroid(uniqueNeighbors);
-          
-          // Move both vertices toward this target
-          var dx1 = targetCentroid[0] - n1.node[0];
-          var dy1 = targetCentroid[1] - n1.node[1];
-          var dist1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
-          
-          var dx2 = targetCentroid[0] - n2.node[0];
-          var dy2 = targetCentroid[1] - n2.node[1];
-          var dist2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
-          
-          if (dist1 < 0.02 && dist2 < 0.02) continue;
-          
-          var moveAmt = 0.12;
-          var new1X = n1.node[0] + (dx1 / Math.max(dist1, 0.01)) * Math.min(moveAmt, dist1 * 0.5);
-          var new1Y = n1.node[1] + (dy1 / Math.max(dist1, 0.01)) * Math.min(moveAmt, dist1 * 0.5);
-          var new2X = n2.node[0] + (dx2 / Math.max(dist2, 0.01)) * Math.min(moveAmt, dist2 * 0.5);
-          var new2Y = n2.node[1] + (dy2 / Math.max(dist2, 0.01)) * Math.min(moveAmt, dist2 * 0.5);
-          
-          new1X = Math.max(0.02, Math.min(0.98, new1X));
-          new1Y = Math.max(0.02, Math.min(0.98, new1Y));
-          new2X = Math.max(0.02, Math.min(0.98, new2X));
-          new2Y = Math.max(0.02, Math.min(0.98, new2Y));
-          
-          // Apply moves
-          n1.node[0] = new1X;
-          n1.node[1] = new1Y;
-          n2.node[0] = new2X;
-          n2.node[1] = new2Y;
-          
-          // Check for collisions
-          var valid = !isTooClose(graph, n1.node, new1X, new1Y) || true; // already moved
-          var tooCloseToOther = false;
-          var d = Math.sqrt(Math.pow(new1X - new2X, 2) + Math.pow(new1Y - new2Y, 2));
-          if (d < MIN_NODE_DIST) tooCloseToOther = true;
-          
-          for (var k = 0; k < graph.nodes.length && !tooCloseToOther; k++) {
-            var other = graph.nodes[k];
-            if (other === n1.node || other === n2.node) continue;
-            var d1 = Math.sqrt(Math.pow(new1X - other[0], 2) + Math.pow(new1Y - other[1], 2));
-            var d2 = Math.sqrt(Math.pow(new2X - other[0], 2) + Math.pow(new2Y - other[1], 2));
-            if (d1 < MIN_NODE_DIST || d2 < MIN_NODE_DIST) tooCloseToOther = true;
-          }
-          
-          if (tooCloseToOther) {
-            n1.node[0] = orig1[0];
-            n1.node[1] = orig1[1];
-            n2.node[0] = orig2[0];
-            n2.node[1] = orig2[1];
-            continue;
-          }
-          
-          var newCount = intersections(graph.links);
-          var improvement = count - newCount;
-          
-          if (improvement > 0) {
-            // Return move for first vertex, restore second (will be moved next iteration)
-            n2.node[0] = orig2[0];
-            n2.node[1] = orig2[1];
-            
-            // Clear stuck tracking for this vertex
-            delete state.recentAttempts[n1.idx];
-            
-            intersections(graph.links);
-            return {
-              node: n1.node,
-              nodeIndex: n1.idx,
-              fromX: orig1[0],
-              fromY: orig1[1],
-              toX: new1X,
-              toY: new1Y,
-              improvement: improvement,
-              strategy: 'unblock-pair'
-            };
-          }
-          
-          // Restore both
-          n1.node[0] = orig1[0];
-          n1.node[1] = orig1[1];
-          n2.node[0] = orig2[0];
-          n2.node[1] = orig2[1];
-        }
-      }
-      
-      // Try moving single neighbors
-      for (var ni = 0; ni < moveableNeighbors.length; ni++) {
-        var item = moveableNeighbors[ni];
-        var node = item.node;
-        var nodeIdx = item.idx;
-        var origX = node[0], origY = node[1];
-        
-        // Try moving toward weighted centroid
-        var wc = weightedCentroid(graph, node);
-        if (!wc) continue;
-        
-        var dx = wc[0] - node[0];
-        var dy = wc[1] - node[1];
-        var dist = Math.sqrt(dx * dx + dy * dy);
-        
-        if (dist < 0.02) continue;
-        
-        var moveAmt = Math.min(0.15, dist * 0.6);
-        var newX = node[0] + (dx / dist) * moveAmt;
-        var newY = node[1] + (dy / dist) * moveAmt;
-        newX = Math.max(0.02, Math.min(0.98, newX));
-        newY = Math.max(0.02, Math.min(0.98, newY));
-        
-        if (isTooClose(graph, node, newX, newY)) continue;
-        
-        node[0] = newX;
-        node[1] = newY;
-        
-        var newCount = intersections(graph.links);
-        var improvement = count - newCount;
-        
-        if (improvement > 0) {
-          delete state.recentAttempts[nodeIdx];
-          intersections(graph.links);
-          return {
-            node: node,
-            nodeIndex: nodeIdx,
-            fromX: origX,
-            fromY: origY,
-            toX: newX,
-            toY: newY,
-            improvement: improvement,
-            strategy: 'unblock-neighbor'
-          };
-        }
-        
-        node[0] = origX;
-        node[1] = origY;
-      }
-    }
-    
-    intersections(graph.links);
-    return null;
-  }
   
   // ===========================================================================
   // SECTION: MANUAL-ONLY STRATEGIES (buttons in interactive mode)
@@ -1533,6 +1119,373 @@
   }
   
   // ===========================================================================
+  // SECTION: STAGE 2 - BARRIER MOVES (topological boundary reasoning)
+  // Triggered when single-move strategies fail but before escape.
+  // Key insight: Jordan curve theorem - if an edge crosses a boundary,
+  // its endpoints must be on opposite sides. Move one to the correct side.
+  // ===========================================================================
+  
+  // findBarrierMove: Try to make non-yellow vertices yellow by moving them
+  // Goal: increase yellow count, not just minimize crossings
+  function findBarrierMove(graph) {
+    var links = graph.links;
+    var nodes = graph.nodes;
+    intersections(links);  // refresh flags
+    
+    // Find non-yellow vertices (have at least one crossing edge)
+    var nonYellow = [];
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].intersection) {
+        nonYellow.push(i);
+      }
+    }
+    
+    if (nonYellow.length === 0) return null;
+    
+    // Get edges for each vertex (for fast lookup)
+    var vertexEdges = [];
+    for (var i = 0; i < nodes.length; i++) vertexEdges[i] = [];
+    for (var i = 0; i < links.length; i++) {
+      var a = nodes.indexOf(links[i][0]);
+      var b = nodes.indexOf(links[i][1]);
+      vertexEdges[a].push(i);
+      vertexEdges[b].push(i);
+    }
+    
+    // Calculate net yellow gain if vertex vi moves to (x, y)
+    // Returns: positive = net gain, 0 = no change, negative = net loss
+    function netYellowGain(vi, x, y) {
+      var node = nodes[vi];
+      var myEdges = vertexEdges[vi];
+      var wasYellow = !node.intersection;
+      
+      // Check if V would be yellow at new position
+      var wouldBeYellow = true;
+      var newCrossings = [];  // edges that V's new position would cross
+      
+      for (var i = 0; i < myEdges.length && wouldBeYellow; i++) {
+        var edge = links[myEdges[i]];
+        var other = edge[0] === node ? edge[1] : edge[0];
+        var ex1 = x, ey1 = y;
+        var ex2 = other[0], ey2 = other[1];
+        
+        for (var j = 0; j < links.length; j++) {
+          if (myEdges.indexOf(j) >= 0) continue;
+          var otherEdge = links[j];
+          if (otherEdge[0] === node || otherEdge[1] === node ||
+              otherEdge[0] === other || otherEdge[1] === other) continue;
+          
+          if (edgesIntersectCoords(ex1, ey1, ex2, ey2,
+              otherEdge[0][0], otherEdge[0][1], otherEdge[1][0], otherEdge[1][1])) {
+            wouldBeYellow = false;
+            newCrossings.push(j);
+          }
+        }
+      }
+      
+      // Gain from V becoming yellow (if it wasn't already)
+      var gain = 0;
+      if (wouldBeYellow && !wasYellow) gain = 1;
+      if (!wouldBeYellow && wasYellow) gain = -1;
+      
+      // Check which currently-yellow vertices would become non-yellow
+      // These are vertices whose edges would now cross V's new edges
+      var yellowVictimsSet = {};
+      for (var i = 0; i < myEdges.length; i++) {
+        var edge = links[myEdges[i]];
+        var other = edge[0] === node ? edge[1] : edge[0];
+        var ex1 = x, ey1 = y;
+        var ex2 = other[0], ey2 = other[1];
+        
+        for (var j = 0; j < links.length; j++) {
+          if (myEdges.indexOf(j) >= 0) continue;
+          var otherEdge = links[j];
+          if (otherEdge[0] === node || otherEdge[1] === node ||
+              otherEdge[0] === other || otherEdge[1] === other) continue;
+          
+          // Check if this edge was NOT crossing before but WOULD cross now
+          var otherV1 = nodes.indexOf(otherEdge[0]);
+          var otherV2 = nodes.indexOf(otherEdge[1]);
+          
+          // Only care if the other edge's vertices are currently yellow
+          if (!nodes[otherV1].intersection) {
+            // This vertex is yellow - would our new edge make it non-yellow?
+            var oldEx1 = node[0], oldEy1 = node[1];
+            var wasIntersecting = edgesIntersectCoords(oldEx1, oldEy1, ex2, ey2,
+                otherEdge[0][0], otherEdge[0][1], otherEdge[1][0], otherEdge[1][1]);
+            var nowIntersecting = edgesIntersectCoords(ex1, ey1, ex2, ey2,
+                otherEdge[0][0], otherEdge[0][1], otherEdge[1][0], otherEdge[1][1]);
+            
+            if (!wasIntersecting && nowIntersecting) {
+              yellowVictimsSet[otherV1] = true;
+            }
+          }
+          if (!nodes[otherV2].intersection && otherV2 !== otherV1) {
+            var oldEx1 = node[0], oldEy1 = node[1];
+            var wasIntersecting = edgesIntersectCoords(oldEx1, oldEy1, ex2, ey2,
+                otherEdge[0][0], otherEdge[0][1], otherEdge[1][0], otherEdge[1][1]);
+            var nowIntersecting = edgesIntersectCoords(ex1, ey1, ex2, ey2,
+                otherEdge[0][0], otherEdge[0][1], otherEdge[1][0], otherEdge[1][1]);
+            
+            if (!wasIntersecting && nowIntersecting) {
+              yellowVictimsSet[otherV2] = true;
+            }
+          }
+        }
+      }
+      
+      var victims = Object.keys(yellowVictimsSet).length;
+      return gain - victims;
+    }
+    
+    // Try each non-yellow vertex
+    for (var c = 0; c < Math.min(5, nonYellow.length); c++) {
+      var vi = nonYellow[c];
+      var node = nodes[vi];
+      var origX = node[0], origY = node[1];
+      
+      // Generate candidate positions: past each neighbor
+      var neighbors = [];
+      vertexEdges[vi].forEach(function(ei) {
+        var edge = links[ei];
+        var other = edge[0] === node ? edge[1] : edge[0];
+        var ni = nodes.indexOf(other);
+        if (neighbors.indexOf(ni) < 0) neighbors.push(ni);
+      });
+      
+      for (var n = 0; n < neighbors.length; n++) {
+        var ni = neighbors[n];
+        var nx = nodes[ni][0], ny = nodes[ni][1];
+        var dx = nx - origX, dy = ny - origY;
+        var dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist < 0.01) continue;
+        
+        // Try position past the neighbor
+        var targetX = nx + dx/dist * 0.05;
+        var targetY = ny + dy/dist * 0.05;
+        targetX = Math.max(0.03, Math.min(0.97, targetX));
+        targetY = Math.max(0.03, Math.min(0.97, targetY));
+        
+        if (isTooClose(graph, node, targetX, targetY)) continue;
+        
+        // Check net yellow gain
+        var gain = netYellowGain(vi, targetX, targetY);
+        if (gain > 0) {
+          return {
+            node: node,
+            nodeIndex: vi,
+            toX: targetX,
+            toY: targetY,
+            improvement: gain,
+            strategy: 'barrierMove'
+          };
+        }
+      }
+      
+      // Also try boundary positions
+      var boundaryPos = [
+        [0.03, origY], [0.97, origY],
+        [origX, 0.03], [origX, 0.97]
+      ];
+      for (var b = 0; b < boundaryPos.length; b++) {
+        var targetX = boundaryPos[b][0];
+        var targetY = boundaryPos[b][1];
+        if (isTooClose(graph, node, targetX, targetY)) continue;
+        
+        var gain = netYellowGain(vi, targetX, targetY);
+        if (gain > 0) {
+          return {
+            node: node,
+            nodeIndex: vi,
+            toX: targetX,
+            toY: targetY,
+            improvement: gain,
+            strategy: 'barrierMove-boundary'
+          };
+        }
+      }
+    }
+    
+    // ========================================================================
+    // STAGE 2B: Two-vertex moves
+    // When single-vertex moves fail, try moving pairs of connected vertices
+    // Key insight: if v1 needs to cross a barrier, its neighbor v2 may need
+    // to move with it to prevent v1-v2 edge from crossing the barrier
+    // ========================================================================
+    
+    // Find crossing pairs
+    var crossingPairs = [];
+    for (var i = 0; i < links.length; i++) {
+      if (!links[i].intersection) continue;
+      for (var j = i + 1; j < links.length; j++) {
+        if (!links[j].intersection) continue;
+        var a = nodes.indexOf(links[i][0]), b = nodes.indexOf(links[i][1]);
+        var c = nodes.indexOf(links[j][0]), d = nodes.indexOf(links[j][1]);
+        if (a === c || a === d || b === c || b === d) continue;
+        if (edgesIntersectCoords(nodes[a][0], nodes[a][1], nodes[b][0], nodes[b][1],
+                                  nodes[c][0], nodes[c][1], nodes[d][0], nodes[d][1])) {
+          crossingPairs.push({e1: [a, b], e2: [c, d]});
+        }
+      }
+    }
+    
+    // For each crossing, try 2-vertex moves
+    for (var cp = 0; cp < Math.min(3, crossingPairs.length); cp++) {
+      var pair = crossingPairs[cp];
+      var e1 = pair.e1, e2 = pair.e2;  // e1 = [a,b], e2 = [c,d]
+      
+      // Use e1 as the "barrier" edge, try to move vertices from e2 to same side
+      var barrierA = e1[0], barrierB = e1[1];
+      var bx1 = nodes[barrierA][0], by1 = nodes[barrierA][1];
+      var bx2 = nodes[barrierB][0], by2 = nodes[barrierB][1];
+      
+      // Check which vertex of e2 is on "wrong" side (opposite side from the other)
+      var sideC = sideOfLine(bx1, by1, bx2, by2, nodes[e2[0]][0], nodes[e2[0]][1]);
+      var sideD = sideOfLine(bx1, by1, bx2, by2, nodes[e2[1]][0], nodes[e2[1]][1]);
+      
+      // They should be on opposite sides (that's why they cross)
+      if (sideC * sideD >= 0) continue;  // same side, shouldn't happen
+      
+      // Move the vertex on negative side to the positive side (where the other vertex is)
+      // Note: sideC and sideD have opposite signs, so exactly one is negative
+      var moveV = sideC < 0 ? e2[0] : e2[1];
+      var targetSide = 1;  // always move to positive side
+      var currentSide = sideC < 0 ? sideC : sideD;  // current (wrong) side of moveV
+      
+      // Find neighbors of moveV that are also on wrong side (negative side)
+      var moveVNeighbors = [];
+      vertexEdges[moveV].forEach(function(ei) {
+        var edge = links[ei];
+        var other = edge[0] === nodes[moveV] ? edge[1] : edge[0];
+        var ni = nodes.indexOf(other);
+        var sideN = sideOfLine(bx1, by1, bx2, by2, other[0], other[1]);
+        // If neighbor is also on the negative (wrong) side, include them
+        if (sideN < 0) {
+          moveVNeighbors.push(ni);
+        }
+      });
+      
+      // Try moving moveV with each of its wrong-side neighbors
+      for (var nbr = 0; nbr < moveVNeighbors.length; nbr++) {
+        var v2 = moveVNeighbors[nbr];
+        
+        // Count original yellow
+        var origYellowCount = 0;
+        for (var i = 0; i < nodes.length; i++) {
+          if (!nodes[i].intersection) origYellowCount++;
+        }
+        
+        // Save original positions
+        var orig1 = [nodes[moveV][0], nodes[moveV][1]];
+        var orig2 = [nodes[v2][0], nodes[v2][1]];
+        
+        // Search grid for best positions (0.05 spacing, full canvas range)
+        var bestGain = 0;
+        var bestPos1 = null, bestPos2 = null;
+        
+        for (var x1 = 0.03; x1 <= 0.97; x1 += 0.05) {
+          for (var y1 = 0.03; y1 <= 0.97; y1 += 0.05) {
+            // Must be on positive side (targetSide = 1)
+            var s1 = sideOfLine(bx1, by1, bx2, by2, x1, y1);
+            if (s1 <= 0) continue;
+            
+            // Check not too close to other vertices
+            var tooClose1 = false;
+            for (var k = 0; k < nodes.length; k++) {
+              if (k === moveV || k === v2) continue;
+              var dx = nodes[k][0] - x1, dy = nodes[k][1] - y1;
+              if (Math.sqrt(dx*dx + dy*dy) < 0.02) { tooClose1 = true; break; }
+            }
+            if (tooClose1) continue;
+            
+            for (var x2 = 0.03; x2 <= 0.97; x2 += 0.05) {
+              for (var y2 = 0.03; y2 <= 0.97; y2 += 0.05) {
+                // Must be on positive side
+                var s2 = sideOfLine(bx1, by1, bx2, by2, x2, y2);
+                if (s2 <= 0) continue;
+                
+                // Check not too close
+                var tooClose2 = false;
+                for (var k = 0; k < nodes.length; k++) {
+                  if (k === moveV || k === v2) continue;
+                  var dx = nodes[k][0] - x2, dy = nodes[k][1] - y2;
+                  if (Math.sqrt(dx*dx + dy*dy) < 0.02) { tooClose2 = true; break; }
+                }
+                if (tooClose2) continue;
+                
+                // Check v1 and v2 not too close to each other
+                var dxPair = x1 - x2, dyPair = y1 - y2;
+                if (Math.sqrt(dxPair*dxPair + dyPair*dyPair) < 0.02) continue;
+                
+                // Try the moves
+                nodes[moveV][0] = x1; nodes[moveV][1] = y1;
+                nodes[v2][0] = x2; nodes[v2][1] = y2;
+                
+                intersections(links);
+                var newYellowCount = 0;
+                for (var k = 0; k < nodes.length; k++) {
+                  if (!nodes[k].intersection) newYellowCount++;
+                }
+                
+                var gain = newYellowCount - origYellowCount;
+                if (gain > bestGain) {
+                  bestGain = gain;
+                  bestPos1 = [x1, y1];
+                  bestPos2 = [x2, y2];
+                }
+                
+                // Reset
+                nodes[moveV][0] = orig1[0]; nodes[moveV][1] = orig1[1];
+                nodes[v2][0] = orig2[0]; nodes[v2][1] = orig2[1];
+              }
+            }
+          }
+        }
+        
+        // Restore original intersection state
+        intersections(links);
+        
+        if (bestGain > 0 && bestPos1 && bestPos2) {
+          // Return as a 2-move combo (execute first move, second will be found next iteration)
+          return {
+            node: nodes[moveV],
+            nodeIndex: moveV,
+            toX: bestPos1[0],
+            toY: bestPos1[1],
+            improvement: bestGain,
+            strategy: 'barrierMove-2vertex',
+            // Store second move for next iteration
+            secondMove: {
+              nodeIndex: v2,
+              toX: bestPos2[0],
+              toY: bestPos2[1]
+            }
+          };
+        }
+      }
+    }
+    
+    return null;
+  }
+  
+  // Edge intersection test using coordinates directly
+  function edgesIntersectCoords(x1, y1, x2, y2, x3, y3, x4, y4) {
+    var denom = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4);
+    if (Math.abs(denom) < 1e-10) return false;
+    var t = ((x1-x3)*(y3-y4) - (y1-y3)*(x3-x4)) / denom;
+    var u = -((x1-x2)*(y1-y3) - (y1-y2)*(x1-x3)) / denom;
+    return t > 0 && t < 1 && u > 0 && u < 1;
+  }
+  
+  // Which side of line (x1,y1)-(x2,y2) is point (px,py)?
+  // Returns positive, negative, or ~0
+  function sideOfLine(x1, y1, x2, y2, px, py) {
+    return (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1);
+  }
+  
+  // Simple edge intersection test
+  
+  // ===========================================================================
   // SECTION: ESCAPE STRATEGY (last resort in main loop)
   // Called when all other strategies fail. May increase crossings by up to 5.
   // Targets "sore thumb" vertices: long edges + weak anchor score.
@@ -1664,456 +1617,6 @@
   }
   
   // ===========================================================================
-  // SECTION: EXPERIMENTAL STRATEGIES (not in main loop)
-  // These exist but are NOT called by solverStep. See ALGO_ARCHIVE.md.
-  // Kept for potential future use or reference.
-  // ===========================================================================
-  
-  // sideOfEdge: Helper - which side of a line segment is a point on?
-  // Returns positive, negative, or ~0 (on the line)
-  function sideOfEdge(edge, point) {
-    var ax = edge[0][0], ay = edge[0][1];
-    var bx = edge[1][0], by = edge[1][1];
-    var px = point[0], py = point[1];
-    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
-  }
-  
-  // Find edges with multiple conflicts where conflicting vertices are on the same side
-  // Moving those vertices to the other side would resolve all conflicts at once
-  function findEdgeSideMove(graph) {
-    var count = intersections(graph.links);
-    if (count === 0) return null;
-    
-    // For each edge, collect vertices whose edges cross it
-    var edgeConflicts = [];
-    
-    for (var i = 0; i < graph.links.length; i++) {
-      var edge = graph.links[i];
-      if (!edge.intersection) continue;
-      
-      var conflictingVertices = [];
-      
-      for (var j = 0; j < graph.links.length; j++) {
-        if (i === j) continue;
-        var other = graph.links[j];
-        if (intersect(edge, other)) {
-          // The conflicting vertices are the endpoints of 'other' that aren't part of 'edge'
-          if (other[0] !== edge[0] && other[0] !== edge[1]) {
-            if (conflictingVertices.indexOf(other[0]) === -1) {
-              conflictingVertices.push(other[0]);
-            }
-          }
-          if (other[1] !== edge[0] && other[1] !== edge[1]) {
-            if (conflictingVertices.indexOf(other[1]) === -1) {
-              conflictingVertices.push(other[1]);
-            }
-          }
-        }
-      }
-      
-      if (conflictingVertices.length >= 1) {  // lowered from 2 - even 1 conflict can be edge-side solvable
-        edgeConflicts.push({ edge: edge, vertices: conflictingVertices });
-      }
-    }
-    
-    // Sort by most conflicts (biggest payoff for fixing)
-    edgeConflicts.sort(function(a, b) { return b.vertices.length - a.vertices.length; });
-    
-    // Try each problematic edge
-    for (var ec = 0; ec < Math.min(5, edgeConflicts.length); ec++) {
-      var item = edgeConflicts[ec];
-      var edge = item.edge;
-      var vertices = item.vertices;
-      
-      // Check if vertices are all on the same side
-      var sides = vertices.map(function(v) { return sideOfEdge(edge, v); });
-      var allPositive = sides.every(function(s) { return s > 0.001; });
-      var allNegative = sides.every(function(s) { return s < -0.001; });
-      
-      if (!allPositive && !allNegative) continue;  // not all on same side
-      
-      // Calculate target side (flip the sign)
-      var targetSign = allPositive ? -1 : 1;
-      
-      // Edge midpoint and perpendicular direction
-      var edgeDx = edge[1][0] - edge[0][0];
-      var edgeDy = edge[1][1] - edge[0][1];
-      var edgeLen = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy);
-      // Perpendicular direction (normalized)
-      var perpX = -edgeDy / edgeLen * targetSign;
-      var perpY = edgeDx / edgeLen * targetSign;
-      
-      // Filter to moveable vertices (low anchor score)
-      var moveableVertices = vertices.filter(function(v) {
-        return anchorScore(graph, v) < 0.6;
-      });
-      
-      if (moveableVertices.length === 0) continue;
-      
-      // FIRST: Try moving ALL moveable vertices together (group move)
-      if (moveableVertices.length >= 2) {
-        var origPositions = moveableVertices.map(function(v) { return [v[0], v[1]]; });
-        var valid = true;
-        
-        // Move all vertices to other side
-        for (var vi = 0; vi < moveableVertices.length; vi++) {
-          var node = moveableVertices[vi];
-          var distFromEdge = Math.abs(sideOfEdge(edge, node)) / edgeLen;
-          var moveDistance = distFromEdge * 2 + 0.05;
-          
-          var newX = node[0] + perpX * moveDistance;
-          var newY = node[1] + perpY * moveDistance;
-          newX = Math.max(0.02, Math.min(0.98, newX));
-          newY = Math.max(0.02, Math.min(0.98, newY));
-          
-          node[0] = newX;
-          node[1] = newY;
-          
-          // Check side
-          var newSide = sideOfEdge(edge, node);
-          if ((targetSign > 0 && newSide <= 0) || (targetSign < 0 && newSide >= 0)) {
-            valid = false;
-          }
-        }
-        
-        // Check for too-close violations after all moves
-        if (valid) {
-          for (var vi = 0; vi < moveableVertices.length && valid; vi++) {
-            for (var vj = 0; vj < graph.nodes.length && valid; vj++) {
-              var other = graph.nodes[vj];
-              if (moveableVertices.indexOf(other) >= 0) continue;
-              var dx = moveableVertices[vi][0] - other[0];
-              var dy = moveableVertices[vi][1] - other[1];
-              if (dx * dx + dy * dy < MIN_NODE_DIST * MIN_NODE_DIST) {
-                valid = false;
-              }
-            }
-          }
-        }
-        
-        if (valid) {
-          var newCount = intersections(graph.links);
-          var improvement = count - newCount;
-          
-          if (improvement > 0) {
-            // Return move for first vertex (others moved as side effect, will be handled next steps)
-            var firstNode = moveableVertices[0];
-            var firstIdx = graph.nodes.indexOf(firstNode);
-            var move = {
-              node: firstNode,
-              nodeIndex: firstIdx,
-              fromX: origPositions[0][0],
-              fromY: origPositions[0][1],
-              toX: firstNode[0],
-              toY: firstNode[1],
-              improvement: improvement,
-              strategy: 'edge-side-group'
-            };
-            // Restore other vertices (we only officially "move" one at a time)
-            for (var vi = 1; vi < moveableVertices.length; vi++) {
-              moveableVertices[vi][0] = origPositions[vi][0];
-              moveableVertices[vi][1] = origPositions[vi][1];
-            }
-            intersections(graph.links);
-            return move;
-          }
-        }
-        
-        // Restore all
-        for (var vi = 0; vi < moveableVertices.length; vi++) {
-          moveableVertices[vi][0] = origPositions[vi][0];
-          moveableVertices[vi][1] = origPositions[vi][1];
-        }
-      }
-      
-      // SECOND: Try moving vertices individually (original approach)
-      for (var vi = 0; vi < moveableVertices.length; vi++) {
-        var node = moveableVertices[vi];
-        var nodeIdx = graph.nodes.indexOf(node);
-        var origX = node[0], origY = node[1];
-        
-        var distFromEdge = Math.abs(sideOfEdge(edge, node)) / edgeLen;
-        var moveDistance = distFromEdge * 2 + 0.05;
-        
-        var newX = origX + perpX * moveDistance;
-        var newY = origY + perpY * moveDistance;
-        newX = Math.max(0.02, Math.min(0.98, newX));
-        newY = Math.max(0.02, Math.min(0.98, newY));
-        
-        if (isTooClose(graph, node, newX, newY)) continue;
-        
-        node[0] = newX;
-        node[1] = newY;
-        var newSide = sideOfEdge(edge, node);
-        
-        if ((targetSign > 0 && newSide <= 0) || (targetSign < 0 && newSide >= 0)) {
-          node[0] = origX;
-          node[1] = origY;
-          continue;
-        }
-        
-        var newCount = intersections(graph.links);
-        var improvement = count - newCount;
-        
-        if (improvement > 0) {
-          var move = {
-            node: node,
-            nodeIndex: nodeIdx,
-            fromX: origX,
-            fromY: origY,
-            toX: newX,
-            toY: newY,
-            improvement: improvement,
-            strategy: 'edge-side'
-          };
-          node[0] = origX;
-          node[1] = origY;
-          intersections(graph.links);
-          return move;
-        }
-        
-        node[0] = origX;
-        node[1] = origY;
-      }
-    }
-    
-    intersections(graph.links);
-    return null;
-  }
-  
-  // Find triangles with clean boundaries (no external crossings)
-  // These form independent subproblems that are easy to solve
-  function findCleanTriangles(graph) {
-    var triangles = [];
-    var n = graph.nodes.length;
-    
-    // Build adjacency for fast lookup
-    var adj = {};
-    for (var i = 0; i < n; i++) adj[i] = {};
-    graph.links.forEach(function(link) {
-      var a = graph.nodes.indexOf(link[0]);
-      var b = graph.nodes.indexOf(link[1]);
-      adj[a][b] = true;
-      adj[b][a] = true;
-    });
-    
-    // Find all triangles
-    for (var i = 0; i < n; i++) {
-      for (var j = i + 1; j < n; j++) {
-        if (!adj[i][j]) continue;
-        for (var k = j + 1; k < n; k++) {
-          if (adj[i][k] && adj[j][k]) {
-            triangles.push([i, j, k]);
-          }
-        }
-      }
-    }
-    
-    return triangles;
-  }
-  
-  // Check if a triangle has clean boundaries (its edges have no crossings)
-  function isCleanTriangle(graph, tri) {
-    var triNodes = [graph.nodes[tri[0]], graph.nodes[tri[1]], graph.nodes[tri[2]]];
-    var triEdges = [];
-    
-    // Find the triangle's edges
-    graph.links.forEach(function(link) {
-      var inTri0 = triNodes.indexOf(link[0]) >= 0;
-      var inTri1 = triNodes.indexOf(link[1]) >= 0;
-      if (inTri0 && inTri1) triEdges.push(link);
-    });
-    
-    // Check if any triangle edge has a crossing
-    for (var i = 0; i < triEdges.length; i++) {
-      if (triEdges[i].intersection) return false;
-    }
-    return true;
-  }
-  
-  // Find vertices inside a triangle
-  function findInteriorVertices(graph, tri) {
-    var p1 = graph.nodes[tri[0]];
-    var p2 = graph.nodes[tri[1]];
-    var p3 = graph.nodes[tri[2]];
-    
-    // Point-in-triangle test using barycentric coordinates
-    function inTriangle(p) {
-      var d1 = (p[0] - p2[0]) * (p1[1] - p2[1]) - (p1[0] - p2[0]) * (p[1] - p2[1]);
-      var d2 = (p[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p[1] - p3[1]);
-      var d3 = (p[0] - p1[0]) * (p3[1] - p1[1]) - (p3[0] - p1[0]) * (p[1] - p1[1]);
-      var hasNeg = (d1 < 0) || (d2 < 0) || (d3 < 0);
-      var hasPos = (d1 > 0) || (d2 > 0) || (d3 > 0);
-      return !(hasNeg && hasPos);
-    }
-    
-    var interior = [];
-    for (var i = 0; i < graph.nodes.length; i++) {
-      if (i === tri[0] || i === tri[1] || i === tri[2]) continue;
-      if (inTriangle(graph.nodes[i])) {
-        interior.push(i);
-      }
-    }
-    return interior;
-  }
-  
-  // Strategy: Find clean triangles and solve their interiors
-  function findTriangleSolveMove(graph) {
-    var count = intersections(graph.links);
-    if (count === 0) return null;
-    
-    var triangles = findCleanTriangles(graph);
-    
-    for (var t = 0; t < triangles.length; t++) {
-      var tri = triangles[t];
-      if (!isCleanTriangle(graph, tri)) continue;
-      
-      var interior = findInteriorVertices(graph, tri);
-      if (interior.length === 0) continue;
-      
-      // Check if any interior vertex is in conflict
-      var conflictingInterior = interior.filter(function(idx) {
-        return graph.nodes[idx].intersection;
-      });
-      
-      if (conflictingInterior.length === 0) continue;
-      
-      // Found a clean triangle with conflicting interior vertices
-      // Try to solve by moving interior vertices toward triangle centroid
-      var triCentroid = [
-        (graph.nodes[tri[0]][0] + graph.nodes[tri[1]][0] + graph.nodes[tri[2]][0]) / 3,
-        (graph.nodes[tri[0]][1] + graph.nodes[tri[1]][1] + graph.nodes[tri[2]][1]) / 3
-      ];
-      
-      // Try moving each conflicting interior vertex
-      for (var c = 0; c < conflictingInterior.length; c++) {
-        var nodeIdx = conflictingInterior[c];
-        var node = graph.nodes[nodeIdx];
-        var origX = node[0], origY = node[1];
-        
-        // Try positions within the triangle
-        var positions = [
-          triCentroid,
-          [(graph.nodes[tri[0]][0] + triCentroid[0]) / 2, (graph.nodes[tri[0]][1] + triCentroid[1]) / 2],
-          [(graph.nodes[tri[1]][0] + triCentroid[0]) / 2, (graph.nodes[tri[1]][1] + triCentroid[1]) / 2],
-          [(graph.nodes[tri[2]][0] + triCentroid[0]) / 2, (graph.nodes[tri[2]][1] + triCentroid[1]) / 2]
-        ];
-        
-        for (var p = 0; p < positions.length; p++) {
-          var pos = positions[p];
-          if (isTooClose(graph, node, pos[0], pos[1])) continue;
-          
-          node[0] = pos[0];
-          node[1] = pos[1];
-          var newCount = intersections(graph.links);
-          
-          if (newCount < count) {
-            var move = {
-              node: node,
-              nodeIndex: nodeIdx,
-              fromX: origX,
-              fromY: origY,
-              toX: pos[0],
-              toY: pos[1],
-              improvement: count - newCount,
-              strategy: 'triangle-solve'
-            };
-            node[0] = origX;
-            node[1] = origY;
-            intersections(graph.links);
-            return move;
-          }
-        }
-        
-        node[0] = origX;
-        node[1] = origY;
-      }
-    }
-    
-    intersections(graph.links);
-    return null;
-  }
-  
-  // Declutter strategy: push yellow vertices toward boundaries to create space
-  // This enables "making space" moves that don't directly reduce crossings
-  function findDeclutterMove(graph) {
-    var count = intersections(graph.links);
-    if (count === 0 || count > 30) return null;  // only useful in mid/late game
-    
-    // Find yellow (conflict-free) vertices near the center
-    var centerX = 0.5, centerY = 0.5;
-    var yellowNearCenter = [];
-    
-    for (var i = 0; i < graph.nodes.length; i++) {
-      var node = graph.nodes[i];
-      if (node.intersection) continue;  // skip blue vertices
-      
-      var distFromCenter = Math.sqrt(
-        Math.pow(node[0] - centerX, 2) + Math.pow(node[1] - centerY, 2)
-      );
-      
-      if (distFromCenter < 0.35) {  // within center region
-        yellowNearCenter.push({ node: node, index: i, dist: distFromCenter });
-      }
-    }
-    
-    if (yellowNearCenter.length === 0) return null;
-    
-    // Sort by closest to center (most blocking)
-    yellowNearCenter.sort(function(a, b) { return a.dist - b.dist; });
-    
-    // Try pushing the most central yellow vertex toward the nearest boundary
-    for (var j = 0; j < Math.min(5, yellowNearCenter.length); j++) {
-      var candidate = yellowNearCenter[j];
-      var node = candidate.node;
-      var origX = node[0], origY = node[1];
-      
-      // Determine which boundary is closest and push toward it
-      var pushDirections = [];
-      if (origX < 0.5) pushDirections.push([-1, 0]);  // push left
-      else pushDirections.push([1, 0]);  // push right
-      if (origY < 0.5) pushDirections.push([0, -1]);  // push up
-      else pushDirections.push([0, 1]);  // push down
-      
-      for (var d = 0; d < pushDirections.length; d++) {
-        var dir = pushDirections[d];
-        var pushAmount = 0.15;
-        var newX = Math.max(0.02, Math.min(0.98, origX + dir[0] * pushAmount));
-        var newY = Math.max(0.02, Math.min(0.98, origY + dir[1] * pushAmount));
-        
-        if (isTooClose(graph, node, newX, newY)) continue;
-        
-        // Check that this doesn't create new crossings
-        node[0] = newX;
-        node[1] = newY;
-        var newCount = intersections(graph.links);
-        node[0] = origX;
-        node[1] = origY;
-        
-        if (newCount <= count) {  // doesn't make things worse
-          intersections(graph.links);  // restore
-          return {
-            node: node,
-            nodeIndex: candidate.index,
-            fromX: origX,
-            fromY: origY,
-            toX: newX,
-            toY: newY,
-            improvement: count - newCount,
-            strategy: 'declutter'
-          };
-        }
-      }
-      
-      node[0] = origX;
-      node[1] = origY;
-    }
-    
-    intersections(graph.links);
-    return null;
-  }
-  
-  // ===========================================================================
   // SECTION: MAIN SOLVER LOOP
   // Orchestrates strategy selection based on crossing count (game phase).
   // Includes oscillation detection to prevent strategies from fighting.
@@ -2237,16 +1740,42 @@
       }
     }
     
-    // NOTE: findDeclutterMove exists but is disabled for now - needs refinement
-    // It pushes yellow vertices to boundaries to make space, but may hurt more than help
-    
-    // Stuck - increment counter and try escape moves
+    // Stage 1 is stuck - increment counter
     state.stuckCount = (state.stuckCount || 0) + 1;
     state.recentAttempts = state.recentAttempts || {};
     
-    // If pauseBeforeEscape is set, signal that we would escape instead of doing it
+    // If pauseBeforeEscape is set, signal that Stage 1 is stuck (before trying Stage 2)
+    // This lets interactive mode intervene at the Stage 1 stuck point
     if (state.pauseBeforeEscape) {
       return { done: false, wouldEscape: true, count: count, stuckCount: state.stuckCount };
+    }
+    
+    // Stage 2: Try barrier moves (topological boundary reasoning)
+    // Only try every 5 stuck iterations - expensive operation
+    if ((state.stuckCount || 0) % 5 === 0) {
+      best = findBarrierMove(graph);
+      if (best && best.improvement > 0) {
+        if (!wouldOscillate(state, best.nodeIndex, best.toX, best.toY)) {
+          best.node[0] = best.toX;
+          best.node[1] = best.toY;
+          recordMove(state, best.nodeIndex, best.toX, best.toY);
+          
+          // Handle 2-vertex moves: apply second move immediately
+          if (best.secondMove) {
+            var sm = best.secondMove;
+            var node2 = graph.nodes[sm.nodeIndex];
+            if (!wouldOscillate(state, sm.nodeIndex, sm.toX, sm.toY)) {
+              node2[0] = sm.toX;
+              node2[1] = sm.toY;
+              recordMove(state, sm.nodeIndex, sm.toX, sm.toY);
+            }
+          }
+          
+          var newCount = intersections(graph.links);
+          state.stuckCount = 0;
+          return { done: false, improved: true, move: best, count: newCount };
+        }
+      }
     }
     
     // Try escape move
@@ -2480,79 +2009,6 @@
   }
   
   // Move entire clump as a rigid body to create space
-  function findMoveClumpMove(graph) {
-    var count = intersections(graph.links);
-    if (count === 0) return null;
-    
-    var clumps = findClumps(graph);
-    if (clumps.length === 0 || clumps[0].length < 2) return null;
-    
-    var bestMove = null;
-    var bestImprovement = 0;
-    
-    // Try moving the largest clump
-    var clump = clumps[0];
-    
-    // Calculate clump center
-    var cx = 0, cy = 0;
-    clump.forEach(function(c) { cx += c[0]; cy += c[1]; });
-    cx /= clump.length;
-    cy /= clump.length;
-    
-    // Save original positions
-    var origPositions = clump.map(function(n) { return [n[0], n[1]]; });
-    
-    // Try translating in various directions
-    var directions = [];
-    for (var angle = 0; angle < Math.PI * 2; angle += Math.PI / 6) {
-      directions.push([Math.cos(angle), Math.sin(angle)]);
-    }
-    
-    directions.forEach(function(dir) {
-      for (var dist = 0.03; dist <= 0.1; dist += 0.02) {
-        var dx = dir[0] * dist;
-        var dy = dir[1] * dist;
-        
-        // Move all clump nodes
-        var valid = true;
-        clump.forEach(function(node, i) {
-          var newX = origPositions[i][0] + dx;
-          var newY = origPositions[i][1] + dy;
-          
-          if (newX < 0.02 || newX > 0.98 || newY < 0.02 || newY > 0.98) {
-            valid = false;
-          }
-          node[0] = newX;
-          node[1] = newY;
-        });
-        
-        if (valid) {
-          var newCount = intersections(graph.links);
-          var improvement = count - newCount;
-          
-          if (improvement > bestImprovement) {
-            bestImprovement = improvement;
-            bestMove = {
-              clump: clump,
-              dx: dx,
-              dy: dy,
-              improvement: improvement,
-              strategy: 'shift'
-            };
-          }
-        }
-        
-        // Restore
-        clump.forEach(function(node, i) {
-          node[0] = origPositions[i][0];
-          node[1] = origPositions[i][1];
-        });
-      }
-    });
-    
-    intersections(graph.links);
-    return bestMove;
-  }
   
   // ===========================================================================
   // SECTION: INTERACTIVE/UI STRATEGIES
@@ -2871,15 +2327,11 @@
   exports.planarGraph = planarGraph;
   exports.scramble = scramble;
   exports.getNeighbors = getNeighbors;
-  exports.findBestMove = findBestMove;
   exports.findBestMoveFast = findBestMoveFast;
-  exports.findBottleneckMove = findBottleneckMove;
   exports.findBottleneckMoveFast = findBottleneckMoveFast;
-  exports.getCrossingCounts = getCrossingCounts;
   exports.findGridMove = findGridMove;
   exports.findEscapeMove = findEscapeMove;
   exports.findGrowClumpMove = findGrowClumpMove;
-  exports.findMoveClumpMove = findMoveClumpMove;
   exports.findClumps = findClumps;
   exports.solverStep = solverStep;
   exports.solvePuzzle = solvePuzzle;
@@ -2887,20 +2339,16 @@
   exports.getNodeEdges = getNodeEdges;
   exports.findCentroidMove = findCentroidMove;
   exports.findAnchoredCentroidMove = findAnchoredCentroidMove;
-  exports.findDeclutterMove = findDeclutterMove;
-  exports.findTriangleSolveMove = findTriangleSolveMove;
-  exports.findEdgeSideMove = findEdgeSideMove;
   exports.findFinisherMove = findFinisherMove;
-  exports.findUnblockMove = findUnblockMove;
   exports.findCompactMove = findCompactMove;
   exports.findRelocateMove = findRelocateMove;
   exports.findConsolidateMove = findConsolidateMove;
-  exports.findCleanTriangles = findCleanTriangles;
   exports.findLocalMove = findLocalMove;
   exports.findUncrossMove = findUncrossMove;
   exports.findWiggleMove = findWiggleMove;
   exports.centroid = centroid;
   exports.weightedCentroid = weightedCentroid;
   exports.anchorScore = anchorScore;
+  exports.findBarrierMove = findBarrierMove;
   
 })(typeof module !== 'undefined' && module.exports ? module.exports : (window.Solver = {}));

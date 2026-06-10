@@ -4,11 +4,10 @@ This documents strategies and approaches that have been tried but are currently 
 
 > **Maintenance**: Update this file when making algorithmic changes. When disabling a strategy, document why. When trying something new, add it here even if it fails. This lets future sessions quickly recapitulate what's been explored.
 
-## Currently Unused Strategies
+## Removed Strategies
 
-### Experimental Strategies (in solver.js, not called from solverStep)
-
-These are fully implemented but not called from `solverStep`:
+These implementations were removed from `solver.js` during consolidation because
+they had no active callers. They remain available in Git history:
 
 | Strategy | Purpose | Why Disabled |
 |----------|---------|--------------|
@@ -18,6 +17,7 @@ These are fully implemented but not called from `solverStep`:
 | `findUnblockMove` | When vertex is stuck, move its neighbors instead | Relies on `state.recentAttempts` tracking, complex logic |
 | `findTriangleSolveMove` | Find "clean triangles" and solve their interiors | Rarely triggers (clean triangles are uncommon) |
 | `findDeclutterMove` | Push yellow vertices toward boundaries to make space | Often hurts more than helps by spreading things out |
+| `findMoveClumpMove` | Translate entire clump as rigid body | Rarely finds improvements; expensive to compute |
 
 ### Manual-Only Strategies (in solver.js, buttons only)
 
@@ -28,7 +28,6 @@ These are available as interactive buttons but removed from the auto solver loop
 | `findCompactMove` | Tighten local clusters of yellow vertices | Was causing solver to get stuck faster; user prefers to trigger manually when appropriate |
 | `findRelocateMove` | Move yellow vertices toward their weighted centroid | Allows +3 crossing increase for "reorganization"; too risky in auto mode |
 | `findConsolidateMove` | Grow largest geometric cluster by pulling in nearby vertices | Intentionally ignores crossing count; purely structural |
-| `findMoveClumpMove` | Translate entire clump as rigid body | Rarely finds improvements; expensive to compute |
 
 ## Historical Approaches (No Longer in Code)
 
@@ -92,7 +91,9 @@ Proposed flow: 1 → 2 → 3 → 1 → 2 → 3...
 
 ## Codebase Structure
 
-**solver.js** (~2900 lines) is the single source of truth for all algorithms. It has section headers for navigation:
+**solver.js** is the single source of truth for active algorithms. `interactive.html`
+is the lead human-in-the-loop workflow. `solver.html` and `benchmark.js` evaluate
+the same shared `solverStep()` implementation.
 
 - `CORE GRAPH FUNCTIONS` - intersection detection, graph generation
 - `ANCHOR SCORING` - determines how "fixed" a vertex is  
@@ -100,7 +101,6 @@ Proposed flow: 1 → 2 → 3 → 1 → 2 → 3...
 - `FAST STRATEGIES` - used in main loop (findBestMoveFast, findBottleneckMoveFast)
 - `MANUAL-ONLY STRATEGIES` - buttons only (findCompactMove, findRelocateMove, etc.)
 - `ESCAPE STRATEGY` - last resort in main loop
-- `EXPERIMENTAL STRATEGIES` - not in main loop (findEdgeSideMove, findTriangleSolveMove, etc.)
 - `MAIN SOLVER LOOP` - solverStep orchestration
 - `CLUMP-BASED STRATEGIES` - findGrowClumpMove (active in loop)
 - `INTERACTIVE/UI STRATEGIES` - centroid, local, uncross, wiggle
@@ -109,5 +109,9 @@ A modular file split was attempted but had browser dependency issues. Deleted th
 
 ---
 
-*Last updated: March 2026*
-*To restore any strategy: it's still in solver.js, just not called from `solverStep`*
+Interactive mode intentionally supports pausing the shared solver before
+Stage 2/escape so a user can intervene. This is configuration of the shared
+solver, not a separate algorithm chain.
+
+*Last updated: June 2026*
+*To restore a removed strategy, retrieve it from Git history and benchmark it before reconnecting it.*

@@ -1,37 +1,99 @@
 {
-  "timestamp": "2026-03-28T20:32:02.218Z",
+  "timestamp": "2026-06-10T02:23:14.041Z",
   "config": {
-    "numPuzzles": 2,
-    "nodeCount": 15
+    "numPuzzles": 10,
+    "nodeCount": 20
   },
   "summary": {
-    "solved": 2,
-    "stuck": 0,
-    "solveRate": "100.0%",
-    "avgMovesPerSolve": "29.0"
+    "solved": 9,
+    "stuck": 1,
+    "solveRate": "90.0%",
+    "avgMovesPerSolve": "65.8"
   },
   "strategyTotals": {
-    "bottleneck-centroid-fast": 6,
-    "bottleneck-sample-fast": 6,
-    "grid": 13,
-    "anchored-centroid": 14,
-    "escape-boundary": 8,
-    "finisher": 5,
-    "escape-centroid": 4
+    "bottleneck-centroid-fast": 73,
+    "bottleneck-sample-fast": 75,
+    "grid": 94,
+    "anchored-centroid": 56,
+    "escape-boundary": 479,
+    "escape-random": 21,
+    "grow": 2,
+    "escape-centroid": 185,
+    "finisher": 15,
+    "random-fast": 7,
+    "centroid-fast": 1,
+    "local": 7,
+    "barrierMove-2vertex": 4
   },
   "results": [
     {
       "puzzle": 0,
       "solved": true,
-      "moves": 41,
-      "initialCrossings": 99,
+      "moves": 38,
+      "initialCrossings": 207,
       "finalCrossings": 0
     },
     {
       "puzzle": 1,
       "solved": true,
-      "moves": 17,
-      "initialCrossings": 92,
+      "moves": 21,
+      "initialCrossings": 236,
+      "finalCrossings": 0
+    },
+    {
+      "puzzle": 2,
+      "solved": false,
+      "moves": 500,
+      "initialCrossings": 208,
+      "finalCrossings": 5
+    },
+    {
+      "puzzle": 3,
+      "solved": true,
+      "moves": 21,
+      "initialCrossings": 220,
+      "finalCrossings": 0
+    },
+    {
+      "puzzle": 4,
+      "solved": true,
+      "moves": 22,
+      "initialCrossings": 249,
+      "finalCrossings": 0
+    },
+    {
+      "puzzle": 5,
+      "solved": true,
+      "moves": 30,
+      "initialCrossings": 262,
+      "finalCrossings": 0
+    },
+    {
+      "puzzle": 6,
+      "solved": true,
+      "moves": 71,
+      "initialCrossings": 265,
+      "finalCrossings": 0
+    },
+    {
+      "puzzle": 7,
+      "solved": true,
+      "moves": 262,
+      "initialCrossings": 216,
+      "finalCrossings": 0
+    },
+    {
+      "puzzle": 8,
+      "solved": true,
+      "moves": 92,
+      "initialCrossings": 204,
+      "finalCrossings": 0
+    },
+    {
+      "puzzle": 9,
+      "solved": true,
+      "moves": 35,
+      "initialCrossings": 200,
       "finalCrossings": 0
     }
   ]

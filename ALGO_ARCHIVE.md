@@ -95,6 +95,22 @@ Proposed flow: 1 → 2 → 3 → 1 → 2 → 3...
 is the lead human-in-the-loop workflow. `solver.html` and `benchmark.js` evaluate
 the same shared `solverStep()` implementation.
 
+Interactive also exposes two diagnostic APIs:
+
+- `analyzeGraphState()` reports crossings, clean graph-connected regions,
+  crossing concentration, recent progress, and repeated vertices.
+- `minimizeStep()` applies one strictly crossing-reducing geometric move without
+  invoking structural, escape, clump, or zero-gain strategies.
+
+The default Stage 1 descent uses `findAdaptiveMinimizeMove()`. It ranks a bounded
+set of crossing-heavy vertices, tries deterministic centroid/local positions
+first, then spends a small random budget. It replaces crossing-count-based
+early/mid/late routing in the shared `solverStep()` path.
+
+The experimental `findBarrierMove()` remains exported for direct testing but is
+not called by the default solver loop. Its exhaustive two-vertex search caused
+severe stalls and is not yet a justified structural operation.
+
 - `CORE GRAPH FUNCTIONS` - intersection detection, graph generation
 - `ANCHOR SCORING` - determines how "fixed" a vertex is  
 - `INCREMENTAL CROSSING DETECTION` - fast move evaluation

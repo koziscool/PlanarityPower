@@ -65,7 +65,7 @@
       background: #600;
     }
     .side-panel {
-      width: 140px;
+      width: 260px;
       display: flex;
       flex-direction: column;
       gap: 8px;
@@ -96,6 +96,19 @@
       flex: 1;
       padding: 8px 4px;
     }
+    .diagnosis {
+      padding: 8px;
+      border: 1px solid #555;
+      border-radius: 4px;
+      background: #222;
+      color: #ddd;
+      font-family: monospace;
+      font-size: 11px;
+      line-height: 1.45;
+      white-space: normal;
+    }
+    .diagnosis .warning { color: #fc6; }
+    .diagnosis .good { color: #8d8; }
     circle { cursor: default; }
   </style>
 </head>
@@ -113,10 +126,14 @@
     
     <div class="side-panel">
       <div class="section-label">Solver</div>
-      <button id="btn-step">Step</button>
+      <button id="btn-analyze">Analyze</button>
+      <button id="btn-minimize">Minimize One Step</button>
       <button id="btn-run">Run</button>
       <button id="btn-compact">Compact</button>
       <button id="btn-consolidate">Consolidate</button>
+
+      <div class="section-label">Diagnosis</div>
+      <div id="diagnosis" class="diagnosis">Analyze a graph to inspect its state.</div>
       
       <div class="section-label">History</div>
       <div class="history-row">
@@ -157,6 +174,8 @@
     var scramble = Solver.scramble;
     var getNeighbors = Solver.getNeighbors;
     var solverStepCore = Solver.solverStep;
+    var minimizeStepCore = Solver.minimizeStep;
+    var analyzeGraphState = Solver.analyzeGraphState;
     var findClumps = Solver.findClumps;
     var findEscapeMove = Solver.findEscapeMove;
     var findCompactMove = Solver.findCompactMove;
@@ -250,7 +269,7 @@
     // ============ EXECUTE SOLVER STEP ============
     // Uses the same solver logic as the dashboard (from solver.js)
     
-    function executeStep(puzzle, callback) {
+    function executeStep(puzzle, callback, minimizeOnly) {
       var graph = puzzle.graph;
       puzzle.count = intersections(graph.links);
       
@@ -263,11 +282,15 @@
       // Use shared solver step from solver.js
       puzzle.solverState = puzzle.solverState || {};
       
-      // Check if we should pause before escape moves
-      var pauseOnEscape = document.getElementById('pause-on-escape').checked;
-      puzzle.solverState.pauseBeforeEscape = pauseOnEscape;
-      
-      var result = solverStepCore(graph, puzzle.solverState);
+      var result;
+      if (minimizeOnly) {
+        result = minimizeStepCore(graph, puzzle.solverState);
+      } else {
+        // Check if we should pause before escape moves
+        var pauseOnEscape = document.getElementById('pause-on-escape').checked;
+        puzzle.solverState.pauseBeforeEscape = pauseOnEscape;
+        result = solverStepCore(graph, puzzle.solverState);
+      }
       
       if (result.done) {
         puzzle.status = 'solved';
@@ -300,6 +323,8 @@
       if (result.move) {
         var move = result.move;
         var nodeIndex = graph.nodes.indexOf(move.node);
+        puzzle.status = 'running';
+        puzzle.escapeStuckCount = 0;
         
         // The solver already applied the move, so we need to undo it for animation
         var toX = move.node[0];
@@ -944,6 +969,47 @@
       if (p.status === 'stuck') statusText += ' | STUCK';
       
       document.getElementById('status').textContent = statusText;
+      updateDiagnosis(p);
+    }
+
+    function updateDiagnosis(puzzle) {
+      puzzle.solverState = puzzle.solverState || {};
+      var analysis = analyzeGraphState(puzzle.graph, puzzle.solverState);
+      puzzle.analysis = analysis;
+
+      var concentration = analysis.crossingConcentration.map(function(item) {
+        return 'v' + item.vertex + ':' + item.crossings;
+      }).join(', ') || 'none';
+      var regions = analysis.cleanRegions.slice(0, 5).map(function(region) {
+        return region.length;
+      }).join(', ') || 'none';
+      var trendClass = analysis.stalled ? 'warning' : 'good';
+      var trendText = analysis.stalled
+        ? 'stalled'
+        : (analysis.recentImprovement > 0 ? '-' + analysis.recentImprovement + ' recent crossings' : 'insufficient history');
+      var attempt = analysis.lastMinimizeAttempt;
+      var attemptText = attempt
+        ? attempt.positionsTested + ' positions / ' + attempt.verticesTested +
+          ' vertices; best -' + attempt.bestImprovement +
+          (attempt.exhausted ? ' (exhausted)' : '')
+        : 'none yet';
+
+      document.getElementById('diagnosis').innerHTML =
+        '<div>Crossings: ' + analysis.crossings + '</div>' +
+        '<div>Clean: ' + analysis.cleanVertices + '/' + puzzle.graph.nodes.length +
+          ' (' + Math.round(analysis.cleanRatio * 100) + '%)</div>' +
+        '<div>Clean regions: ' + analysis.cleanRegions.length +
+          ' [' + regions + ']</div>' +
+        '<div>Largest clean region: ' + analysis.largestCleanRegion + '</div>' +
+        '<div>Crossing-heavy: ' + concentration + '</div>' +
+        '<div>Top concentration: ' + Math.round(analysis.topCrossingShare * 100) + '%</div>' +
+        '<div class="' + trendClass + '">Progress: ' + trendText + '</div>' +
+        '<div>Recent: [' + analysis.recentCrossings.join(', ') + ']</div>' +
+        '<div>Repeated vertices: ' +
+          (analysis.oscillatingVertices.join(', ') || 'none') + '</div>' +
+        '<div>Last minimize: ' + attemptText + '</div>';
+
+      return analysis;
     }
     
     function updateGlobalStats() {
@@ -997,10 +1063,17 @@
     
     document.getElementById('reset-btn').addEventListener('click', createPuzzles);
     
-    // Step button - single auto move
-    document.getElementById('btn-step').addEventListener('click', function() {
+    document.getElementById('btn-analyze').addEventListener('click', function() {
+      if (puzzles.length > 0) {
+        var analysis = updateDiagnosis(puzzles[0]);
+        console.log('Graph diagnosis:', analysis);
+      }
+    });
+
+    // Strictly crossing-reducing geometric move; excludes escape/structural moves.
+    document.getElementById('btn-minimize').addEventListener('click', function() {
       if (puzzles.length > 0 && !puzzles[0].animating) {
-        executeStep(puzzles[0], function() { updateStatus(); });
+        executeStep(puzzles[0], function() { updateStatus(); }, true);
       }
     });
     

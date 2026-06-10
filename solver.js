@@ -484,6 +484,116 @@
     return counts;
   }
 
+  function recordCrossingHistory(state, crossingCount) {
+    state.crossingHistory = state.crossingHistory || [];
+    var lastHistory = state.crossingHistory[state.crossingHistory.length - 1];
+    if (lastHistory !== crossingCount) {
+      state.crossingHistory.push(crossingCount);
+      if (state.crossingHistory.length > 20) state.crossingHistory.shift();
+    }
+  }
+
+  // Analyze the current drawing without changing vertex positions.
+  // The optional state object supplies recent solver history for progress and
+  // oscillation diagnosis.
+  function analyzeGraphState(graph, state) {
+    state = state || {};
+    var crossingCount = intersections(graph.links);
+    var crossingCounts = getCrossingCounts(graph);
+    var cleanIndices = [];
+    var cleanSet = {};
+    var adjacency = graph.nodes.map(function() { return []; });
+
+    for (var i = 0; i < graph.nodes.length; i++) {
+      if (!graph.nodes[i].intersection) {
+        cleanIndices.push(i);
+        cleanSet[i] = true;
+      }
+    }
+
+    for (var i = 0; i < graph.links.length; i++) {
+      var a = graph.nodes.indexOf(graph.links[i][0]);
+      var b = graph.nodes.indexOf(graph.links[i][1]);
+      if (a === b) continue;
+      adjacency[a].push(b);
+      adjacency[b].push(a);
+    }
+
+    // Graph-connected regions induced by vertices with no crossing incident edge.
+    var visited = {};
+    var cleanRegions = [];
+    for (var i = 0; i < cleanIndices.length; i++) {
+      var start = cleanIndices[i];
+      if (visited[start]) continue;
+      var queue = [start];
+      var region = [];
+      visited[start] = true;
+
+      while (queue.length > 0) {
+        var current = queue.shift();
+        region.push(current);
+        for (var j = 0; j < adjacency[current].length; j++) {
+          var neighbor = adjacency[current][j];
+          if (cleanSet[neighbor] && !visited[neighbor]) {
+            visited[neighbor] = true;
+            queue.push(neighbor);
+          }
+        }
+      }
+      cleanRegions.push(region);
+    }
+    cleanRegions.sort(function(a, b) { return b.length - a.length; });
+
+    var concentration = crossingCounts.map(function(count, index) {
+      return {
+        vertex: index,
+        crossings: count,
+        degree: adjacency[index].length,
+        score: count / Math.max(1, adjacency[index].length)
+      };
+    }).filter(function(item) {
+      return item.crossings > 0;
+    }).sort(function(a, b) {
+      return b.crossings - a.crossings || b.score - a.score;
+    });
+
+    var totalVertexCrossingIncidence = crossingCounts.reduce(function(sum, count) {
+      return sum + count;
+    }, 0);
+    var topCrossingShare = concentration.length > 0 && totalVertexCrossingIncidence > 0
+      ? concentration[0].crossings / totalVertexCrossingIncidence
+      : 0;
+
+    recordCrossingHistory(state, crossingCount);
+    var recent = state.crossingHistory.slice(-6);
+    var recentImprovement = recent.length > 1 ? recent[0] - recent[recent.length - 1] : 0;
+
+    var repeatedMoves = {};
+    (state.recentMoves || []).forEach(function(move) {
+      repeatedMoves[move.nodeIndex] = (repeatedMoves[move.nodeIndex] || 0) + 1;
+    });
+    var oscillatingVertices = Object.keys(repeatedMoves).filter(function(index) {
+      return repeatedMoves[index] >= 3;
+    }).map(function(index) {
+      return +index;
+    });
+
+    return {
+      crossings: crossingCount,
+      cleanVertices: cleanIndices.length,
+      cleanRatio: graph.nodes.length > 0 ? cleanIndices.length / graph.nodes.length : 1,
+      cleanRegions: cleanRegions,
+      largestCleanRegion: cleanRegions.length > 0 ? cleanRegions[0].length : 0,
+      crossingConcentration: concentration.slice(0, 5),
+      topCrossingShare: topCrossingShare,
+      recentCrossings: recent,
+      recentImprovement: recentImprovement,
+      stalled: crossingCount > 0 && recent.length >= 3 && recentImprovement <= 0,
+      oscillatingVertices: oscillatingVertices,
+      lastMinimizeAttempt: state.lastMinimizeAttempt || null
+    };
+  }
+
   // Finisher strategy - when very close to solved, exhaustively find the exact solution
   // For each crossing, identify exactly which vertex move would resolve it
   function findFinisherMove(graph) {
@@ -1663,19 +1773,184 @@
     }
     return move;
   }
+
+  // Focused Stage 1 descent. Rank a small set of problematic vertices, try
+  // deterministic positions first, then spend a small random budget only when
+  // needed. Returns null when the bounded search finds no reducing move.
+  function findAdaptiveMinimizeMove(graph, state, options) {
+    state = state || {};
+    options = options || {};
+
+    var count = intersections(graph.links);
+    if (count === 0) return null;
+
+    var crossingCounts = getCrossingCounts(graph);
+    var candidateLimit = options.candidateLimit || Math.min(8, graph.nodes.length);
+    var randomSamples = options.randomSamples === undefined ? 5 : options.randomSamples;
+    var strongImprovement = options.strongImprovement ||
+      Math.max(3, Math.ceil(count * 0.03));
+    var repeatedMoves = {};
+
+    (state.recentMoves || []).forEach(function(move) {
+      repeatedMoves[move.nodeIndex] = (repeatedMoves[move.nodeIndex] || 0) + 1;
+    });
+
+    var ranked = [];
+    for (var i = 0; i < graph.nodes.length; i++) {
+      if (crossingCounts[i] === 0) continue;
+      var degree = getNodeEdges(graph, graph.nodes[i]).length;
+      var repeatPenalty = repeatedMoves[i] || 0;
+      ranked.push({
+        index: i,
+        node: graph.nodes[i],
+        crossings: crossingCounts[i],
+        degree: degree,
+        score: crossingCounts[i] * 2 + crossingCounts[i] / Math.max(1, degree) - repeatPenalty
+      });
+    }
+    ranked.sort(function(a, b) { return b.score - a.score; });
+    ranked = ranked.slice(0, candidateLimit);
+
+    var bestMove = null;
+    var bestImprovement = 0;
+    var positionsTested = 0;
+    var deterministicTested = 0;
+    var randomTested = 0;
+    var verticesTested = 0;
+
+    function testPosition(item, edges, crossingsBefore, x, y, strategy) {
+      x = Math.max(0.02, Math.min(0.98, x));
+      y = Math.max(0.02, Math.min(0.98, y));
+      if (isTooClose(graph, item.node, x, y)) return false;
+
+      var oldX = item.node[0], oldY = item.node[1];
+      item.node[0] = x;
+      item.node[1] = y;
+      var crossingsAfter = countEdgeCrossings(graph, edges);
+      item.node[0] = oldX;
+      item.node[1] = oldY;
+
+      positionsTested++;
+      var improvement = crossingsBefore - crossingsAfter;
+      if (improvement > bestImprovement &&
+          !wouldOscillate(state, item.index, x, y)) {
+        bestImprovement = improvement;
+        bestMove = {
+          node: item.node,
+          nodeIndex: item.index,
+          fromX: oldX,
+          fromY: oldY,
+          toX: x,
+          toY: y,
+          improvement: improvement,
+          strategy: strategy
+        };
+      }
+      return bestImprovement >= strongImprovement;
+    }
+
+    // Deterministic pass: centroids and small local moves on ranked vertices.
+    for (var r = 0; r < ranked.length; r++) {
+      var item = ranked[r];
+      var node = item.node;
+      var edges = getNodeEdges(graph, node);
+      var crossingsBefore = countEdgeCrossings(graph, edges);
+      var neighbors = getNeighbors(graph, node);
+      verticesTested++;
+
+      if (neighbors.length > 0) {
+        var cx = 0, cy = 0;
+        for (var n = 0; n < neighbors.length; n++) {
+          cx += neighbors[n][0];
+          cy += neighbors[n][1];
+        }
+        cx /= neighbors.length;
+        cy /= neighbors.length;
+
+        deterministicTested++;
+        if (testPosition(item, edges, crossingsBefore, cx, cy, 'adaptive-centroid')) break;
+        deterministicTested++;
+        if (testPosition(item, edges, crossingsBefore,
+            node[0] + (cx - node[0]) * 0.5,
+            node[1] + (cy - node[1]) * 0.5,
+            'adaptive-centroid-half')) break;
+      }
+
+      var directions = [
+        [1, 0], [-1, 0], [0, 1], [0, -1],
+        [1, 1], [1, -1], [-1, 1], [-1, -1]
+      ];
+      for (var d = 0; d < directions.length; d++) {
+        deterministicTested++;
+        if (testPosition(item, edges, crossingsBefore,
+            node[0] + directions[d][0] * 0.04,
+            node[1] + directions[d][1] * 0.04,
+            'adaptive-local')) break;
+      }
+      if (bestImprovement >= strongImprovement) break;
+    }
+
+    // Random pass only if deterministic candidates did not find a strong move.
+    if (bestImprovement < strongImprovement) {
+      for (var r = 0; r < ranked.length; r++) {
+        var item = ranked[r];
+        var edges = getNodeEdges(graph, item.node);
+        var crossingsBefore = countEdgeCrossings(graph, edges);
+        for (var s = 0; s < randomSamples; s++) {
+          randomTested++;
+          if (testPosition(item, edges, crossingsBefore,
+              0.05 + Math.random() * 0.9,
+              0.05 + Math.random() * 0.9,
+              'adaptive-random')) break;
+        }
+        if (bestImprovement >= strongImprovement) break;
+      }
+    }
+
+    var attempt = {
+      crossingCount: count,
+      candidateVertices: ranked.map(function(item) { return item.index; }),
+      verticesTested: verticesTested,
+      positionsTested: positionsTested,
+      deterministicTested: deterministicTested,
+      randomTested: randomTested,
+      strongImprovementTarget: strongImprovement,
+      bestImprovement: bestImprovement,
+      exhausted: !bestMove
+    };
+    state.lastMinimizeAttempt = attempt;
+    if (bestMove) bestMove.search = attempt;
+    return bestMove;
+  }
+
+  // Apply one strictly crossing-reducing geometric move.
+  // This intentionally excludes structural, escape, clump, and zero-gain moves.
+  function minimizeStep(graph, state) {
+    state = state || {};
+    var count = intersections(graph.links);
+    if (count === 0) return { done: true, count: 0 };
+    recordCrossingHistory(state, count);
+
+    var best = findAdaptiveMinimizeMove(graph, state);
+    if (!best) {
+      return { done: false, improved: false, move: null, count: count };
+    }
+
+    best.node[0] = best.toX;
+    best.node[1] = best.toY;
+    recordMove(state, best.nodeIndex, best.toX, best.toY);
+    var newCount = intersections(graph.links);
+    recordCrossingHistory(state, newCount);
+    return { done: false, improved: true, move: best, count: newCount };
+  }
   
   // solverStep(graph, state): Execute one solver iteration
   // 
-  // PHASE-BASED STRATEGY SELECTION:
-  //   Early game (>50 crossings): findBottleneckMoveFast, findBestMoveFast
-  //   Mid game (15-50 crossings): + findGridMove, findGrowClumpMove  
-  //   Late game (<15 crossings): + findFinisherMove, findLocalMove
-  //
   // FALLBACK CHAIN:
-  //   1. Try phase-appropriate strategies
+  //   1. Try focused adaptive crossing minimization
   //   2. Try findAnchoredCentroidMove (gentle repositioning)
-  //   3. Try findEscapeMove (last resort, may increase crossings by up to 5)
-  //   4. Give up if stuck too long (stuckLimit varies by crossing count)
+  //   3. Try Stage 2 / escape behavior
+  //   4. Give up if stuck too long
   //
   // RETURNS: { done, improved, move, count, stuck?, wouldEscape? }
   //
@@ -1683,6 +1958,7 @@
     state = state || {};
     state.totalMoves = (state.totalMoves || 0) + 1;
     var count = intersections(graph.links);
+    recordCrossingHistory(state, count);
     
     if (count === 0) {
       return { done: true, count: 0 };
@@ -1690,27 +1966,7 @@
     
     var best = null;
     
-    // Try strategies in order - if oscillation blocks one, try the next
-    if (count > 50) {
-      best = tryMove(graph, state, findBottleneckMoveFast, 25);
-      if (!best) best = tryMove(graph, state, findBestMoveFast, 35);
-    }
-    // Mid game
-    else if (count > 15) {
-      best = tryMove(graph, state, findBottleneckMoveFast, 25);
-      if (!best) best = tryMove(graph, state, findBestMoveFast, 35);
-      if (!best) best = tryMove(graph, state, findGridMove);
-      if (!best) best = tryMove(graph, state, findGrowClumpMove);
-    }
-    // Late game
-    else {
-      best = tryMove(graph, state, findGridMove);
-      if (!best) best = tryMove(graph, state, findFinisherMove);
-      if (!best) best = tryMove(graph, state, findLocalMove);  // small nudges
-      if (!best) best = tryMove(graph, state, findGrowClumpMove);
-      if (!best) best = tryMove(graph, state, findBottleneckMoveFast, 20);
-      if (!best) best = tryMove(graph, state, findBestMoveFast, 35);
-    }
+    best = findAdaptiveMinimizeMove(graph, state);
     
     // If we found a valid move, apply it
     if (best) {
@@ -1748,34 +2004,6 @@
     // This lets interactive mode intervene at the Stage 1 stuck point
     if (state.pauseBeforeEscape) {
       return { done: false, wouldEscape: true, count: count, stuckCount: state.stuckCount };
-    }
-    
-    // Stage 2: Try barrier moves (topological boundary reasoning)
-    // Only try every 5 stuck iterations - expensive operation
-    if ((state.stuckCount || 0) % 5 === 0) {
-      best = findBarrierMove(graph);
-      if (best && best.improvement > 0) {
-        if (!wouldOscillate(state, best.nodeIndex, best.toX, best.toY)) {
-          best.node[0] = best.toX;
-          best.node[1] = best.toY;
-          recordMove(state, best.nodeIndex, best.toX, best.toY);
-          
-          // Handle 2-vertex moves: apply second move immediately
-          if (best.secondMove) {
-            var sm = best.secondMove;
-            var node2 = graph.nodes[sm.nodeIndex];
-            if (!wouldOscillate(state, sm.nodeIndex, sm.toX, sm.toY)) {
-              node2[0] = sm.toX;
-              node2[1] = sm.toY;
-              recordMove(state, sm.nodeIndex, sm.toX, sm.toY);
-            }
-          }
-          
-          var newCount = intersections(graph.links);
-          state.stuckCount = 0;
-          return { done: false, improved: true, move: best, count: newCount };
-        }
-      }
     }
     
     // Try escape move
@@ -2333,6 +2561,9 @@
   exports.findEscapeMove = findEscapeMove;
   exports.findGrowClumpMove = findGrowClumpMove;
   exports.findClumps = findClumps;
+  exports.analyzeGraphState = analyzeGraphState;
+  exports.findAdaptiveMinimizeMove = findAdaptiveMinimizeMove;
+  exports.minimizeStep = minimizeStep;
   exports.solverStep = solverStep;
   exports.solvePuzzle = solvePuzzle;
   exports.evaluateMoveDelta = evaluateMoveDelta;

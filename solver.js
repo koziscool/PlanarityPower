@@ -646,7 +646,6 @@
             edgeMap[Math.min(b, c) + ',' + Math.max(b, c)],
             edgeMap[a + ',' + c]
           ];
-          if (triangleEdges.some(function(edge) { return edge.intersection; })) continue;
           if (Math.abs(sideOfEdge([graph.nodes[a], graph.nodes[b]], graph.nodes[c])) < 1e-6) {
             continue;
           }
@@ -678,13 +677,25 @@
 
           var triPoints = [graph.nodes[a], graph.nodes[b], graph.nodes[c]];
           var classified = components.map(function(component) {
+            var componentSet = {};
+            component.forEach(function(index) { componentSet[index] = true; });
             var inside = component.filter(function(index) {
               return pointInTriangle(graph.nodes[index], triPoints[0], triPoints[1], triPoints[2]);
             }).length;
+            var componentBoundaryCrossings = 0;
+            graph.links.forEach(function(link) {
+              var linkA = graph.nodes.indexOf(link[0]);
+              var linkB = graph.nodes.indexOf(link[1]);
+              if (!componentSet[linkA] && !componentSet[linkB]) return;
+              triangleEdges.forEach(function(triangleEdge) {
+                if (intersect(link, triangleEdge)) componentBoundaryCrossings++;
+              });
+            });
             return {
               vertices: component,
               insideCount: inside,
               outsideCount: component.length - inside,
+              boundaryCrossings: componentBoundaryCrossings,
               side: inside === component.length ? 'inside' :
                 inside === 0 ? 'outside' : 'straddling'
             };
@@ -692,6 +703,9 @@
 
           triangles.push({
             vertices: [a, b, c],
+            boundaryCrossings: triangleEdges.filter(function(edge) {
+              return edge.intersection;
+            }).length,
             components: classified
           });
         }
@@ -701,15 +715,19 @@
     triangles.sort(function(x, y) {
       var xStraddling = x.components.filter(function(c) { return c.side === 'straddling'; }).length;
       var yStraddling = y.components.filter(function(c) { return c.side === 'straddling'; }).length;
-      return yStraddling - xStraddling ||
+      return y.boundaryCrossings - x.boundaryCrossings ||
+        yStraddling - xStraddling ||
         Math.min.apply(null, x.components.map(function(c) { return c.vertices.length; })) -
         Math.min.apply(null, y.components.map(function(c) { return c.vertices.length; }));
     });
     return triangles;
   }
 
-  function transformComponent(graph, component, target, targetCenter, scale) {
+  function transformComponent(graph, component, target, targetCenter, scale, rotation) {
     var center = [0, 0];
+    rotation = rotation || 0;
+    var cosRotation = Math.cos(rotation);
+    var sinRotation = Math.sin(rotation);
     component.forEach(function(index) {
       center[0] += graph.nodes[index][0];
       center[1] += graph.nodes[index][1];
@@ -718,8 +736,12 @@
     center[1] /= component.length;
 
     return component.map(function(index) {
-      var x = targetCenter[0] + (graph.nodes[index][0] - center[0]) * scale;
-      var y = targetCenter[1] + (graph.nodes[index][1] - center[1]) * scale;
+      var dx = graph.nodes[index][0] - center[0];
+      var dy = graph.nodes[index][1] - center[1];
+      var x = targetCenter[0] +
+        (dx * cosRotation - dy * sinRotation) * scale;
+      var y = targetCenter[1] +
+        (dx * sinRotation + dy * cosRotation) * scale;
       return {
         index: index,
         x: Math.max(0.02, Math.min(0.98, x)),
@@ -755,7 +777,10 @@
     var triangles = findSeparatingTriangles(graph).slice(0, options.triangleLimit || 12);
     var candidates = [];
     var candidateLimit = options.candidateLimit || 24;
-    var simulationSteps = options.simulationSteps || 15;
+    var simulationSteps = options.simulationSteps === undefined ? 15 : options.simulationSteps;
+    var maxComponentSize = options.maxComponentSize || Infinity;
+    var expandedInsidePlacements = !!options.expandedInsidePlacements;
+    var requireComponentBoundaryCrossing = !!options.requireComponentBoundaryCrossing;
 
     for (var ti = 0; ti < triangles.length && candidates.length < candidateLimit; ti++) {
       var triangle = triangles[ti];
@@ -767,6 +792,8 @@
 
       for (var ci = 0; ci < triangle.components.length && candidates.length < candidateLimit; ci++) {
         var component = triangle.components[ci];
+        if (component.vertices.length > maxComponentSize) continue;
+        if (requireComponentBoundaryCrossing && component.boundaryCrossings === 0) continue;
         var componentCenter = [0, 0];
         component.vertices.forEach(function(index) {
           componentCenter[0] += graph.nodes[index][0];
@@ -815,11 +842,44 @@
 
         var targets = [];
         if (requestedSides.indexOf('inside') >= 0) {
-          targets.push({
-            side: 'inside',
-            center: triCenter,
-            scale: Math.min(0.35, 0.8 / Math.sqrt(component.vertices.length))
-          });
+          var insideCenters = [triCenter];
+          var insideScales = [Math.min(0.2, 0.5 / Math.sqrt(component.vertices.length))];
+          var insideRotations = [0];
+          if (expandedInsidePlacements) {
+            // Narrow triangles and uneven attachment geometry often require
+            // placing the component away from the exact centroid or rotating
+            // it before it fits without internal/boundary crossings.
+            insideCenters = [];
+            var barycentricDivisions = 8;
+            for (var weightA = 1; weightA < barycentricDivisions - 1; weightA++) {
+              for (var weightB = 1; weightB < barycentricDivisions - weightA;
+                  weightB++) {
+                var weightC = barycentricDivisions - weightA - weightB;
+                if (weightC < 1) continue;
+                insideCenters.push([
+                  (triPoints[0][0] * weightA + triPoints[1][0] * weightB +
+                    triPoints[2][0] * weightC) / barycentricDivisions,
+                  (triPoints[0][1] * weightA + triPoints[1][1] * weightB +
+                    triPoints[2][1] * weightC) / barycentricDivisions
+                ]);
+              }
+            }
+            insideScales = [0.2, 0.1, 0.05];
+            insideRotations = [0, Math.PI / 2, Math.PI, Math.PI * 1.5];
+          }
+          for (var centerIndex = 0; centerIndex < insideCenters.length; centerIndex++) {
+            for (var scaleIndex = 0; scaleIndex < insideScales.length; scaleIndex++) {
+              for (var rotationIndex = 0; rotationIndex < insideRotations.length;
+                  rotationIndex++) {
+                targets.push({
+                  side: 'inside',
+                  center: insideCenters[centerIndex],
+                  scale: insideScales[scaleIndex],
+                  rotation: insideRotations[rotationIndex]
+                });
+              }
+            }
+          }
         }
         if (requestedSides.indexOf('outside') >= 0) {
           var dx = componentCenter[0] - triCenter[0];
@@ -836,14 +896,16 @@
               Math.max(0.1, Math.min(0.9, triCenter[0] + dx / length * 0.45)),
               Math.max(0.1, Math.min(0.9, triCenter[1] + dy / length * 0.45))
             ],
-            scale: Math.min(0.65, 1.2 / Math.sqrt(component.vertices.length))
+            scale: Math.min(0.65, 1.2 / Math.sqrt(component.vertices.length)),
+            rotation: 0
           });
         }
 
         for (var targetIndex = 0; targetIndex < targets.length; targetIndex++) {
           var target = targets[targetIndex];
           var positions = transformComponent(
-            graph, component.vertices, target.side, target.center, target.scale);
+            graph, component.vertices, target.side, target.center, target.scale,
+            target.rotation);
           var insideFlags = positions.map(function(position) {
             return pointInTriangle(
               [position.x, position.y], triPoints[0], triPoints[1], triPoints[2]);
@@ -874,9 +936,14 @@
           candidates.push({
             strategy: 'separating-triangle-component',
             triangle: triangle.vertices,
+            boundaryCrossings: triangle.boundaryCrossings,
+            componentBoundaryCrossings: component.boundaryCrossings,
             component: component.vertices,
             fromSide: component.side,
             toSide: target.side,
+            placementCenter: target.center,
+            placementScale: target.scale,
+            placementRotation: target.rotation || 0,
             positions: positions,
             immediateCrossings: immediateCrossings,
             immediateDamage: immediateDamage,
@@ -902,6 +969,223 @@
       candidates: candidates.slice(0, 5),
       triangles: triangles.slice(0, 5)
     };
+  }
+
+  // Conservative Stage 3 finisher: when a near-solved graph has a small
+  // component attached through a separating triangle, move that complete
+  // component across the triangle only if the group move directly reduces
+  // crossings. The returned positions are executed consecutively by
+  // solverStep so Stage 1 cannot interrupt a temporarily awkward first move.
+  function findSeparatingTriangleFinisher(graph, options) {
+    options = options || {};
+    var baseCrossings = intersections(graph.links);
+    if (baseCrossings === 0 || baseCrossings > (options.crossingLimit || 12)) {
+      return null;
+    }
+
+    var report = suggestStage2Move(graph, {
+      triangleLimit: options.triangleLimit || 20,
+      candidateLimit: options.candidateLimit || 600,
+      simulationSteps: 0,
+      maxComponentSize: options.componentLimit || 6,
+      expandedInsidePlacements: true,
+      requireComponentBoundaryCrossing: true
+    });
+    var candidate = report.candidates.filter(function(item) {
+      return item.componentBoundaryCrossings > 0 &&
+        item.component.length <= (options.componentLimit || 6) &&
+        item.immediateCrossings < baseCrossings;
+    }).sort(function(a, b) {
+      return a.immediateCrossings - b.immediateCrossings ||
+        a.component.length - b.component.length;
+    })[0];
+    if (!candidate) return null;
+
+    return {
+      strategy: 'finisher-separating-triangle',
+      triangle: candidate.triangle,
+      component: candidate.component,
+      positions: candidate.positions,
+      moveCount: candidate.positions.length,
+      baseCrossings: baseCrossings,
+      finalCrossings: candidate.immediateCrossings,
+      improvement: baseCrossings - candidate.immediateCrossings,
+      boundaryCrossings: candidate.boundaryCrossings,
+      componentBoundaryCrossings: candidate.componentBoundaryCrossings,
+      placementCenter: candidate.placementCenter,
+      placementScale: candidate.placementScale,
+      placementRotation: candidate.placementRotation,
+      fromSide: candidate.fromSide,
+      toSide: candidate.toSide
+    };
+  }
+
+  // One-move Stage 3 lookahead. A small setup move can expose the correct
+  // separating-triangle geometry even when it temporarily adds crossings.
+  // Accept only when the setup followed by the complete finisher improves the
+  // original graph.
+  function findSeparatingTriangleFinisherLookahead(graph, options) {
+    options = options || {};
+    var startedAt = Date.now();
+    var timeBudgetMs = options.timeBudgetMs || 90;
+    var damageLimit = options.damageLimit === undefined ? 3 : options.damageLimit;
+    var baseCrossings = intersections(graph.links);
+    if (baseCrossings === 0 || baseCrossings > (options.crossingLimit || 12)) {
+      return null;
+    }
+
+    var candidateSet = {};
+    for (var i = 0; i < graph.links.length; i++) {
+      for (var j = i + 1; j < graph.links.length; j++) {
+        if (!intersect(graph.links[i], graph.links[j])) continue;
+        [graph.links[i][0], graph.links[i][1], graph.links[j][0], graph.links[j][1]]
+          .forEach(function(node) {
+            candidateSet[graph.nodes.indexOf(node)] = true;
+          });
+      }
+    }
+    var candidateVertices = Object.keys(candidateSet).map(Number).slice(0,
+      options.vertexLimit || 10);
+    var directions = [
+      [1, 0], [-1, 0], [0, 1], [0, -1],
+      [1, 1], [1, -1], [-1, 1], [-1, -1]
+    ];
+    var distances = options.distances || [0.04, 0.08, 0.16];
+    var tested = 0;
+    var best = null;
+
+    for (var vi = 0; vi < candidateVertices.length; vi++) {
+      var vertexIndex = candidateVertices[vi];
+      var sourceNode = graph.nodes[vertexIndex];
+      for (var di = 0; di < directions.length; di++) {
+        for (var si = 0; si < distances.length; si++) {
+          if (Date.now() - startedAt >= timeBudgetMs) break;
+          var distance = distances[si];
+          var normalizer = directions[di][0] !== 0 && directions[di][1] !== 0
+            ? Math.sqrt(2) : 1;
+          var toX = Math.max(0.02, Math.min(0.98,
+            sourceNode[0] + directions[di][0] * distance / normalizer));
+          var toY = Math.max(0.02, Math.min(0.98,
+            sourceNode[1] + directions[di][1] * distance / normalizer));
+          if (isTooClose(graph, sourceNode, toX, toY)) continue;
+
+          var simulation = cloneGraph(graph);
+          simulation.nodes[vertexIndex][0] = toX;
+          simulation.nodes[vertexIndex][1] = toY;
+          var setupCrossings = intersections(simulation.links);
+          var setupDamage = setupCrossings - baseCrossings;
+          tested++;
+          if (setupDamage > damageLimit) continue;
+
+          var finisher = findSeparatingTriangleFinisher(simulation, options);
+          if (!finisher || finisher.finalCrossings >= baseCrossings) continue;
+          applyGroupPositions(simulation, finisher.positions);
+          var cleanupState = {};
+          var cleanupSteps = 0;
+          var projectedFinalCrossings = intersections(simulation.links);
+          while (cleanupSteps < (options.cleanupSteps || 3) &&
+              projectedFinalCrossings > 0) {
+            var cleanupMove = findAdaptiveMinimizeMove(simulation, cleanupState, {
+              candidateLimit: 8,
+              randomSamples: 0,
+              strongImprovement: Infinity
+            });
+            if (!cleanupMove) break;
+            cleanupMove.node[0] = cleanupMove.toX;
+            cleanupMove.node[1] = cleanupMove.toY;
+            projectedFinalCrossings = intersections(simulation.links);
+            cleanupSteps++;
+          }
+          if (projectedFinalCrossings !== 0) continue;
+
+          var score = finisher.finalCrossings * 100 + setupDamage * 5 +
+            finisher.component.length;
+          if (!best || score < best.score) {
+            best = {
+              strategy: 'finisher-separating-triangle-lookahead',
+              positions: [{
+                index: vertexIndex,
+                x: toX,
+                y: toY
+              }].concat(finisher.positions),
+              moveCount: finisher.positions.length + 1,
+              setupVertex: vertexIndex,
+              setupCrossings: setupCrossings,
+              setupDamage: setupDamage,
+              triangle: finisher.triangle,
+              component: finisher.component,
+              baseCrossings: baseCrossings,
+              finalCrossings: finisher.finalCrossings,
+              projectedFinalCrossings: projectedFinalCrossings,
+              projectedCleanupSteps: cleanupSteps,
+              improvement: baseCrossings - finisher.finalCrossings,
+              boundaryCrossings: finisher.boundaryCrossings,
+              componentBoundaryCrossings: finisher.componentBoundaryCrossings,
+              placementCenter: finisher.placementCenter,
+              placementScale: finisher.placementScale,
+              placementRotation: finisher.placementRotation,
+              fromSide: finisher.fromSide,
+              toSide: finisher.toSide,
+              testedSetups: tested,
+              elapsedMs: Date.now() - startedAt,
+              score: score
+            };
+            if (finisher.finalCrossings === 0 && setupDamage <= 0) return best;
+          }
+        }
+        if (Date.now() - startedAt >= timeBudgetMs) break;
+      }
+      if (Date.now() - startedAt >= timeBudgetMs) break;
+    }
+    if (best) {
+      best.testedSetups = tested;
+      best.elapsedMs = Date.now() - startedAt;
+    }
+    return best;
+  }
+
+  function takePendingFinisherMove(graph, state) {
+    if (!state.pendingFinisher || state.pendingFinisher.positions.length === 0) {
+      state.pendingFinisher = null;
+      return null;
+    }
+    var plan = state.pendingFinisher;
+    var position = plan.positions.shift();
+    var node = graph.nodes[position.index];
+    var move = {
+      node: node,
+      nodeIndex: position.index,
+      fromX: node[0],
+      fromY: node[1],
+      toX: position.x,
+      toY: position.y,
+      improvement: 0,
+      strategy: plan.strategy,
+      search: {
+        triangle: plan.triangle,
+        component: plan.component,
+        boundaryCrossings: plan.boundaryCrossings,
+        componentBoundaryCrossings: plan.componentBoundaryCrossings,
+        setupVertex: plan.setupVertex === undefined ? null : plan.setupVertex,
+        setupCrossings: plan.setupCrossings === undefined ? null : plan.setupCrossings,
+        setupDamage: plan.setupDamage === undefined ? null : plan.setupDamage,
+        testedSetups: plan.testedSetups === undefined ? null : plan.testedSetups,
+        lookaheadElapsedMs: plan.elapsedMs === undefined ? null : plan.elapsedMs,
+        projectedFinalCrossings: plan.projectedFinalCrossings === undefined
+          ? null : plan.projectedFinalCrossings,
+        projectedCleanupSteps: plan.projectedCleanupSteps === undefined
+          ? null : plan.projectedCleanupSteps,
+        placementCenter: plan.placementCenter,
+        placementScale: plan.placementScale,
+        placementRotation: plan.placementRotation,
+        groupCrossingsBefore: plan.baseCrossings,
+        predictedGroupCrossingsAfter: plan.finalCrossings,
+        groupMoveNumber: (plan.moveCount || plan.component.length) - plan.positions.length,
+        groupMoveCount: plan.moveCount || plan.component.length
+      }
+    };
+    if (plan.positions.length === 0) state.pendingFinisher = null;
+    return move;
   }
 
   function applyStage2Suggestion(graph, suggestion) {
@@ -2968,6 +3252,18 @@
     }
     
     var best = null;
+
+    // Complete an already accepted component relocation before allowing other
+    // strategies to react to its intermediate geometry.
+    best = takePendingFinisherMove(graph, state);
+    if (best) {
+      best.node[0] = best.toX;
+      best.node[1] = best.toY;
+      recordMove(state, best.nodeIndex, best.toX, best.toY);
+      var newCount = intersections(graph.links);
+      best.improvement = count - newCount;
+      return { done: false, improved: newCount < count, move: best, count: newCount };
+    }
     
     best = findAdaptiveMinimizeMove(graph, state);
     
@@ -2979,6 +3275,7 @@
       var newCount = intersections(graph.links);
       state.stuckCount = 0;
       state.recentAttempts = {};
+      state.finisherAttemptedAtCount = null;
       return { done: false, improved: true, move: best, count: newCount };
     }
 
@@ -2994,7 +3291,10 @@
         recordMove(state, best.nodeIndex, best.toX, best.toY);
         var newCount = intersections(graph.links);
         // Don't reset stuck count for zero-improvement moves
-        if (best.improvement > 0) state.stuckCount = 0;
+        if (best.improvement > 0) {
+          state.stuckCount = 0;
+          state.finisherAttemptedAtCount = null;
+        }
         return { done: false, improved: best.improvement > 0, move: best, count: newCount };
       }
     }
@@ -3011,7 +3311,34 @@
       var newCount = intersections(graph.links);
       state.stuckCount = 0;
       state.recentAttempts = {};
+      state.finisherAttemptedAtCount = null;
       return { done: false, improved: true, move: best, count: newCount };
+    }
+
+    // Stage 3: in a nearly solved graph, relocate a small component through a
+    // crossed separating triangle when the complete group move is directly
+    // crossing-reducing.
+    var finisher = null;
+    if (state.finisherAttemptedAtCount !== count) {
+      state.finisherAttemptedAtCount = count;
+      finisher = findSeparatingTriangleFinisher(graph);
+      if (!finisher && count <= 5 && (state.finisherLookaheadAttempts || 0) < 2) {
+        state.finisherLookaheadAttempts = (state.finisherLookaheadAttempts || 0) + 1;
+        finisher = findSeparatingTriangleFinisherLookahead(graph, {
+          crossingLimit: 5
+        });
+      }
+    }
+    if (finisher) {
+      state.pendingFinisher = finisher;
+      best = takePendingFinisherMove(graph, state);
+      best.node[0] = best.toX;
+      best.node[1] = best.toY;
+      recordMove(state, best.nodeIndex, best.toX, best.toY);
+      var newCount = intersections(graph.links);
+      best.improvement = count - newCount;
+      state.stuckCount = 0;
+      return { done: false, improved: newCount < count, move: best, count: newCount };
     }
     
     // Stage 1 is stuck - increment counter
@@ -3023,7 +3350,7 @@
     if (state.pauseBeforeEscape) {
       return { done: false, wouldEscape: true, count: count, stuckCount: state.stuckCount };
     }
-    
+
     // Try escape move
     var escape = findEscapeMove(graph);
     if (escape) {
@@ -3582,6 +3909,9 @@
   exports.analyzeGraphState = analyzeGraphState;
   exports.findSeparatingTriangles = findSeparatingTriangles;
   exports.suggestStage2Move = suggestStage2Move;
+  exports.findSeparatingTriangleFinisher = findSeparatingTriangleFinisher;
+  exports.findSeparatingTriangleFinisherLookahead =
+    findSeparatingTriangleFinisherLookahead;
   exports.suggestStage2Restart = suggestStage2Restart;
   exports.applyStage2Suggestion = applyStage2Suggestion;
   exports.findAdaptiveMinimizeMove = findAdaptiveMinimizeMove;

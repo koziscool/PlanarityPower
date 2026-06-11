@@ -122,8 +122,34 @@ not called by the default solver loop. Its exhaustive two-vertex search caused
 severe stalls and is not yet a justified structural operation.
 
 The first separating-triangle slice uses `findSeparatingTriangles()` and
-`suggestStage2Move()`. It is retained as Stage 3 diagnostic work, but it was too
-narrow to serve as the primary Stage 2 restart mechanism.
+`suggestStage2Move()`. Separating triangles are treated as Jordan curves even
+when their boundary is currently crossed; those crossings are evidence that an
+attached component may be on the wrong side.
+
+The active conservative Stage 3 slice uses
+`findSeparatingTriangleFinisher()` when 12 or fewer crossings remain. It moves
+only a small component of at most six vertices when that component's own edges
+cross a separating-triangle boundary and relocating the complete component
+directly reduces crossings. The component positions are executed consecutively
+so an awkward intermediate vertex move cannot be interrupted by Stage 1. This
+handles easy cases such as moving component `[8,17]` inside triangle
+`[2,12,16]`.
+
+Inside-triangle placement uses a bounded deterministic search over interior
+barycentric positions, three compact scales, and four rotations. This handles
+narrow regions where the topological side choice is clear but placing the
+component at the triangle centroid still creates crossings. The expanded search
+runs only for the near-solved finisher, only on components of at most six
+vertices, and only once per local minimum. Choosing sides for large attached
+components remains future work.
+
+When five or fewer crossings remain and no direct component relocation works,
+the active finisher may test one setup move on a vertex belonging to a current
+crossing edge. The setup may add at most three crossings and is accepted only
+when a subsequent separating-triangle relocation plus at most three
+deterministic Stage 1 cleanup moves is projected to solve the graph. Active
+solver runs allow at most two of these approximately 100 ms lookahead searches
+per graph.
 
 The active suggestion-only Stage 2 slice uses `suggestStage2Restart()`. It
 examines at most three crossing-heavy vertices, generates at most eight direct

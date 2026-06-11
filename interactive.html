@@ -145,6 +145,7 @@
         <button id="btn-back">&larr;</button>
         <button id="btn-forward">&rarr;</button>
       </div>
+      <button id="btn-load-history">Load Debug History</button>
       <button id="btn-write-history">Write Debug History</button>
       
       <div class="section-label">Speed</div>
@@ -153,6 +154,7 @@
   </div>
   
   <input type="hidden" id="num-puzzles" value="1">
+  <input type="file" id="history-file-input" accept=".json,application/json" style="display:none">
 
   <script src="solver.js"></script>
   <script>
@@ -251,6 +253,61 @@
       updateStage2Diagnosis(puzzle, null);
       renderPuzzle(puzzle);
       return true;
+    }
+
+    function loadDebugHistory(payload) {
+      if (!payload || !Array.isArray(payload.nodes) || !Array.isArray(payload.edges) ||
+          !Array.isArray(payload.history) || payload.history.length === 0) {
+        throw new Error('Invalid debug history file');
+      }
+
+      var nodes = payload.nodes.map(function(node) {
+        return [node[0], node[1]];
+      });
+      var links = payload.edges.map(function(edge) {
+        if (!Array.isArray(edge) || edge.length < 2 ||
+            !nodes[edge[0]] || !nodes[edge[1]]) {
+          throw new Error('Debug history contains an invalid edge');
+        }
+        return [nodes[edge[0]], nodes[edge[1]]];
+      });
+      var history = payload.history.map(function(state) {
+        if (!state || !Array.isArray(state.positions) ||
+            state.positions.length !== nodes.length) {
+          throw new Error('Debug history contains an invalid state');
+        }
+        return {
+          positions: state.positions.map(function(position) {
+            return [position[0], position[1]];
+          }),
+          crossings: state.crossings,
+          strategy: state.strategy || '-',
+          movingNode: state.movingNode === undefined ? null : state.movingNode,
+          move: state.move || null
+        };
+      });
+
+      if (puzzles.length === 0) createPuzzles();
+      var puzzle = puzzles[0];
+      puzzle.graph = { nodes: nodes, links: links };
+      puzzle.history = history;
+      puzzle.historyIndex = Math.max(0, Math.min(
+        payload.currentPosition === undefined ? history.length - 1 : payload.currentPosition,
+        history.length - 1));
+      puzzle.moves = payload.moves === undefined ? history.length - 1 : payload.moves;
+      puzzle.status = 'running';
+      puzzle.movingNodeIndex = -1;
+      puzzle.solverState = {};
+      puzzle.stage2Suggestion = null;
+      selectedNodeIndex = payload.selectedVertex === undefined ? -1 : payload.selectedVertex;
+      updateStage2Diagnosis(puzzle, null);
+      restoreState(puzzle, puzzle.historyIndex);
+      puzzle.initialCrossings = history[0].crossings;
+      puzzle.status = puzzle.count === 0 ? 'solved' : 'running';
+      renderPuzzle(puzzle);
+      updateStatus();
+      saveStateToFile(puzzle);
+      return puzzle;
     }
     
     function goBack(puzzle) {
@@ -1452,6 +1509,34 @@
     });
     document.getElementById('btn-forward').addEventListener('click', function() {
       if (puzzles.length > 0) goForward(puzzles[0]);
+    });
+    document.getElementById('btn-load-history').addEventListener('click', function() {
+      document.getElementById('history-file-input').click();
+    });
+    document.getElementById('history-file-input').addEventListener('change', function(event) {
+      var input = event.target;
+      var file = input.files && input.files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function() {
+        try {
+          var payload = JSON.parse(reader.result);
+          var puzzle = loadDebugHistory(payload);
+          document.getElementById('status').textContent =
+            'Loaded history: move ' + puzzle.historyIndex + '/' +
+            (puzzle.history.length - 1) + ', ' + puzzle.count + ' crossings';
+        } catch (error) {
+          document.getElementById('status').textContent =
+            'Could not load debug history: ' + error.message;
+          console.error('Could not load debug history:', error);
+        }
+        input.value = '';
+      };
+      reader.onerror = function() {
+        document.getElementById('status').textContent = 'Could not read debug history file';
+        input.value = '';
+      };
+      reader.readAsText(file);
     });
     document.getElementById('btn-write-history').addEventListener('click', function() {
       if (puzzles.length === 0) return;

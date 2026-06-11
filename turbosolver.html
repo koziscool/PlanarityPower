@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Planarity Turbo Solver</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 10px;
+      font-family: sans-serif;
+      background: #1a1a1a;
+      color: #fff;
+    }
+    .controls {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      padding: 10px;
+      background: #333;
+      border-radius: 5px;
+    }
+    .controls label { margin-right: 14px; }
+    .controls input[type="number"] { width: 65px; }
+    .controls button {
+      padding: 7px 14px;
+      margin-right: 8px;
+      cursor: pointer;
+    }
+    #status {
+      display: block;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(180px, 1fr));
+      gap: 7px;
+      margin-top: 10px;
+    }
+    .puzzle {
+      overflow: hidden;
+      background: #fff;
+      border-radius: 4px;
+    }
+    .puzzle-header {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 6px;
+      background: #333;
+      color: #fff;
+      font-size: 10px;
+    }
+    .puzzle.solved .puzzle-header { background: #075f18; }
+    .puzzle.capped .puzzle-header { background: #765400; }
+    .puzzle.stuck .puzzle-header { background: #700; }
+    canvas {
+      display: block;
+      width: 100%;
+      aspect-ratio: 4 / 3;
+    }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <label>Vertices: <input id="num-nodes" type="number" value="30" min="10" max="200"></label>
+    <label>Graphs: <input id="num-graphs" type="number" value="50" min="1" max="200"></label>
+    <label>Move cap: <input id="move-cap" type="number" value="400" min="1" max="5000"></label>
+    <label>Moves/frame: <input id="moves-frame" type="number" value="10" min="1" max="100"></label>
+    <label>Frame delay: <input id="frame-delay" type="number" value="30" min="0" max="1000"> ms</label>
+    <button id="new-btn">New Batch</button>
+    <button id="run-btn">Run</button>
+    <button id="export-btn">Export Results</button>
+    <span id="status"></span>
+  </div>
+  <div id="grid" class="grid"></div>
+
+  <script src="solver.js"></script>
+  <script>
+    var Solver = window.Solver;
+    var fs = null;
+    if (typeof require !== 'undefined') {
+      if (!Solver) {
+        try { Solver = require('./solver.js'); } catch (error) {}
+      }
+      try { fs = require('fs'); } catch (error) {}
+    }
+
+    var puzzles = [];
+    var running = false;
+    var startedAt = null;
+    var animationHandle = null;
+
+    function numberValue(id, fallback) {
+      return parseInt(document.getElementById(id).value, 10) || fallback;
+    }
+
+    function strategyCounts(history) {
+      var counts = {};
+      history.forEach(function(move) {
+        counts[move.strategy] = (counts[move.strategy] || 0) + 1;
+      });
+      return counts;
+    }
+
+    function createPuzzle(id, nodeCount) {
+      var container = document.createElement('div');
+      container.className = 'puzzle';
+      var header = document.createElement('div');
+      header.className = 'puzzle-header';
+      var canvas = document.createElement('canvas');
+      canvas.width = 400;
+      canvas.height = 300;
+      container.appendChild(header);
+      container.appendChild(canvas);
+      document.getElementById('grid').appendChild(container);
+
+      var graph = Solver.scramble(Solver.planarGraph(nodeCount));
+      var crossings = Solver.intersections(graph.links);
+      return {
+        id: id,
+        graph: graph,
+        solverState: {},
+        container: container,
+        header: header,
+        canvas: canvas,
+        moves: 0,
+        status: 'running',
+        initialCrossings: crossings,
+        crossings: crossings,
+        maxCrossings: crossings,
+        minCrossings: crossings,
+        lastStrategy: '-',
+        history: []
+      };
+    }
+
+    function createBatch() {
+      stop();
+      document.getElementById('grid').innerHTML = '';
+      puzzles = [];
+      startedAt = null;
+      var nodeCount = numberValue('num-nodes', 30);
+      var graphCount = numberValue('num-graphs', 50);
+      for (var i = 0; i < graphCount; i++) {
+        puzzles.push(createPuzzle(i + 1, nodeCount));
+      }
+      renderAll();
+      updateStatus();
+    }
+
+    function drawPuzzle(puzzle) {
+      var canvas = puzzle.canvas;
+      var context = canvas.getContext('2d');
+      var width = canvas.width;
+      var height = canvas.height;
+      var graph = puzzle.graph;
+      Solver.intersections(graph.links);
+
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = '#fff';
+      context.fillRect(0, 0, width, height);
+      graph.links.forEach(function(link) {
+        context.beginPath();
+        context.moveTo(8 + link[0][0] * (width - 16), 8 + link[0][1] * (height - 16));
+        context.lineTo(8 + link[1][0] * (width - 16), 8 + link[1][1] * (height - 16));
+        context.strokeStyle = link.intersection ? '#111' : '#e6ae00';
+        context.lineWidth = link.intersection ? 0.8 : 1.1;
+        context.stroke();
+      });
+      graph.nodes.forEach(function(node) {
+        context.beginPath();
+        context.arc(
+          8 + node[0] * (width - 16),
+          8 + node[1] * (height - 16),
+          2.4, 0, Math.PI * 2);
+        context.fillStyle = node.intersection ? '#00a9d6' : '#ffc400';
+        context.fill();
+      });
+
+      puzzle.container.className = 'puzzle ' + puzzle.status;
+      puzzle.header.innerHTML =
+        '<span>#' + puzzle.id + ' ' + puzzle.crossings + 'x</span>' +
+        '<span>' + puzzle.moves + 'm ' + puzzle.lastStrategy + '</span>';
+      puzzle.container.title =
+        'Initial: ' + puzzle.initialCrossings +
+        '\nMin: ' + puzzle.minCrossings +
+        '\nMax: ' + puzzle.maxCrossings +
+        '\nStatus: ' + puzzle.status;
+    }
+
+    function renderAll() {
+      puzzles.forEach(drawPuzzle);
+    }
+
+    function finishPuzzle(puzzle, status) {
+      puzzle.status = status;
+      puzzle.crossings = Solver.intersections(puzzle.graph.links);
+    }
+
+    function stepPuzzle(puzzle, moveCap) {
+      if (puzzle.status !== 'running') return;
+      if (puzzle.moves >= moveCap) {
+        finishPuzzle(puzzle, 'capped');
+        return;
+      }
+      var result = Solver.solverStep(puzzle.graph, puzzle.solverState);
+      puzzle.crossings = result.count === undefined
+        ? Solver.intersections(puzzle.graph.links) : result.count;
+      puzzle.minCrossings = Math.min(puzzle.minCrossings, puzzle.crossings);
+      puzzle.maxCrossings = Math.max(puzzle.maxCrossings, puzzle.crossings);
+
+      if (result.done || puzzle.crossings === 0) {
+        finishPuzzle(puzzle, 'solved');
+        return;
+      }
+      if (result.stuck) {
+        finishPuzzle(puzzle, 'stuck');
+        return;
+      }
+      if (result.move) {
+        puzzle.moves++;
+        puzzle.lastStrategy = result.move.strategy;
+        puzzle.history.push({
+          move: puzzle.moves,
+          strategy: result.move.strategy,
+          vertex: result.move.nodeIndex,
+          crossings: puzzle.crossings,
+          structuralPlan: result.move.search && result.move.search.structuralPlan || null
+        });
+      }
+      if (puzzle.moves >= moveCap) finishPuzzle(puzzle, 'capped');
+    }
+
+    function updateStatus() {
+      var counts = { running: 0, solved: 0, capped: 0, stuck: 0 };
+      var moves = 0;
+      puzzles.forEach(function(puzzle) {
+        counts[puzzle.status]++;
+        moves += puzzle.moves;
+      });
+      var elapsed = startedAt ? ((Date.now() - startedAt) / 1000).toFixed(1) : '0.0';
+      document.getElementById('status').textContent =
+        'Solved ' + counts.solved + '/' + puzzles.length +
+        ' | Active ' + counts.running +
+        ' | Capped ' + counts.capped +
+        ' | Stuck ' + counts.stuck +
+        ' | Moves ' + moves +
+        ' | Elapsed ' + elapsed + 's';
+    }
+
+    function tick() {
+      if (!running) return;
+      var movesPerFrame = numberValue('moves-frame', 10);
+      var moveCap = numberValue('move-cap', 400);
+      for (var step = 0; step < movesPerFrame; step++) {
+        puzzles.forEach(function(puzzle) {
+          stepPuzzle(puzzle, moveCap);
+        });
+      }
+      renderAll();
+      updateStatus();
+
+      var active = puzzles.some(function(puzzle) {
+        return puzzle.status === 'running';
+      });
+      if (!active) {
+        stop();
+        exportResults(true);
+        return;
+      }
+      animationHandle = setTimeout(tick, numberValue('frame-delay', 30));
+    }
+
+    function run() {
+      if (running) {
+        stop();
+        return;
+      }
+      if (!puzzles.some(function(puzzle) { return puzzle.status === 'running'; })) {
+        createBatch();
+      }
+      running = true;
+      startedAt = startedAt || Date.now();
+      document.getElementById('run-btn').textContent = 'Stop';
+      tick();
+    }
+
+    function stop() {
+      running = false;
+      if (animationHandle) clearTimeout(animationHandle);
+      animationHandle = null;
+      document.getElementById('run-btn').textContent = 'Run';
+      updateStatus();
+    }
+
+    function buildReport() {
+      var solved = puzzles.filter(function(puzzle) {
+        return puzzle.status === 'solved';
+      });
+      var capped = puzzles.filter(function(puzzle) {
+        return puzzle.status === 'capped';
+      });
+      var stuck = puzzles.filter(function(puzzle) {
+        return puzzle.status === 'stuck';
+      });
+      var totalMoves = puzzles.reduce(function(sum, puzzle) {
+        return sum + puzzle.moves;
+      }, 0);
+      return {
+        timestamp: new Date().toISOString(),
+        config: {
+          nodes: numberValue('num-nodes', 30),
+          graphs: puzzles.length,
+          moveCap: numberValue('move-cap', 400),
+          movesPerFrame: numberValue('moves-frame', 10),
+          frameDelayMs: numberValue('frame-delay', 30)
+        },
+        elapsedMs: startedAt ? Date.now() - startedAt : 0,
+        summary: {
+          solved: solved.length,
+          capped: capped.length,
+          stuck: stuck.length,
+          solveRate: puzzles.length > 0 ? solved.length / puzzles.length : 0,
+          totalMoves: totalMoves,
+          averageMovesPerSolve: solved.length > 0
+            ? solved.reduce(function(sum, puzzle) {
+              return sum + puzzle.moves;
+            }, 0) / solved.length : null,
+          longestSuccessfulSolve: solved.length > 0
+            ? Math.max.apply(null, solved.map(function(puzzle) {
+              return puzzle.moves;
+            })) : null
+        },
+        puzzles: puzzles.map(function(puzzle) {
+          return {
+            id: puzzle.id,
+            status: puzzle.status,
+            moves: puzzle.moves,
+            initialCrossings: puzzle.initialCrossings,
+            finalCrossings: puzzle.crossings,
+            minimumCrossings: puzzle.minCrossings,
+            maximumCrossings: puzzle.maxCrossings,
+            strategies: strategyCounts(puzzle.history),
+            history: puzzle.history
+          };
+        })
+      };
+    }
+
+    function exportResults(automatic) {
+      var report = buildReport();
+      var contents = JSON.stringify(report, null, 2);
+      if (fs) {
+        fs.writeFileSync('turbosolver-results.json', contents);
+        if (!automatic) document.getElementById('status').textContent +=
+          ' | Wrote turbosolver-results.json';
+        return;
+      }
+      if (automatic) return;
+      var blob = new Blob([contents], { type: 'application/json' });
+      var link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'turbosolver-results.json';
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
+    document.getElementById('new-btn').addEventListener('click', createBatch);
+    document.getElementById('run-btn').addEventListener('click', run);
+    document.getElementById('export-btn').addEventListener('click', function() {
+      exportResults(false);
+    });
+    createBatch();
+  </script>
+</body>
+</html>

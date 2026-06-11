@@ -69,6 +69,7 @@
       display: flex;
       flex-direction: column;
       gap: 8px;
+      overflow-y: auto;
     }
     .side-panel button {
       padding: 12px 8px;
@@ -132,14 +133,6 @@
       <button id="btn-compact">Compact</button>
       <button id="btn-consolidate">Consolidate</button>
 
-      <div class="section-label">Diagnosis</div>
-      <div id="diagnosis" class="diagnosis">Analyze a graph to inspect its state.</div>
-
-      <div class="section-label">Stage 2</div>
-      <button id="btn-stage2-suggest">Find Stage 2 Restart</button>
-      <button id="btn-stage2-apply" disabled>Apply Suggestion</button>
-      <div id="stage2-diagnosis" class="diagnosis">No structural suggestion yet.</div>
-      
       <div class="section-label">History</div>
       <div class="history-row">
         <button id="btn-back">&larr;</button>
@@ -147,7 +140,15 @@
       </div>
       <button id="btn-load-history">Load Debug History</button>
       <button id="btn-write-history">Write Debug History</button>
-      
+
+      <div class="section-label">Diagnosis</div>
+      <div id="diagnosis" class="diagnosis">Analyze a graph to inspect its state.</div>
+
+      <div class="section-label">Stage 2</div>
+      <button id="btn-stage2-suggest">Find Stage 2 Restart</button>
+      <button id="btn-stage2-apply" disabled>Apply Suggestion</button>
+      <div id="stage2-diagnosis" class="diagnosis">No structural suggestion yet.</div>
+
       <div class="section-label">Speed</div>
       <input type="range" id="speed" min="1" max="100" value="50" style="width:100%">
     </div>
@@ -1270,6 +1271,21 @@
           '; movable [' + structuralPlan.movableVertices.join(',') + ']' +
           '; steps ' + structuralPlan.steps
         : 'none';
+      var extensionSearch = analysis.lastRegionExtensionSearch;
+      var extensionSearchText = extensionSearch
+        ? extensionSearch.candidatesTested + ' tested; ' +
+          (extensionSearch.best
+            ? 'accepted [' + extensionSearch.best.component.join(',') + '] score ' +
+              extensionSearch.best.score.toFixed(1) +
+              '; setup clean/region/conflict ' +
+              extensionSearch.best.setupDelta.cleanVertices + '/' +
+              extensionSearch.best.setupDelta.largestCleanRegion + '/' +
+              extensionSearch.best.setupDelta.conflictVertices +
+              '; projected crossings ' +
+              extensionSearch.best.finalMetrics.crossings
+            : 'none accepted') +
+          '; ' + extensionSearch.elapsedMs + 'ms'
+        : 'none yet';
       var directionalPlansText = analysis.directionalPlans.length > 0
         ? analysis.directionalPlans.slice(0, 3).map(function(plan) {
           return plan.type + ' [' + plan.vertices.join(',') + '] dir (' +
@@ -1291,6 +1307,7 @@
           ' | ' + conflictRegionsText + '</div>' +
         '<div>Directional plans: ' + directionalPlansText + '</div>' +
         '<div>Structural plan: ' + structuralPlanText + '</div>' +
+        '<div>Region extension search: ' + extensionSearchText + '</div>' +
         '<div>Crossing-heavy: ' + concentration + '</div>' +
         '<div>Top concentration: ' + Math.round(analysis.topCrossingShare * 100) + '%</div>' +
         '<div class="' + trendClass + '">Progress: ' + trendText + '</div>' +

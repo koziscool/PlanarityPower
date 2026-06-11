@@ -204,6 +204,17 @@ fewer crossings, the solver may automatically commit a bounded Stage 2 restart
 only when its deterministic rollout projects zero crossings. Partial-progress
 restarts remain suggestion-only.
 
+The second active structural-plan use is a bounded region-extension planner.
+After Stage 1, Stage 1b, the finisher, and the proven-solve restart fail, graphs
+of at most 60 vertices and 80 crossings may test up to five compatible-anchor
+directional groups at three translation distances. Each candidate receives at
+most eight simulated Stage 1 cleanup moves under an approximately 110 ms
+budget. A plan may temporarily add crossings, but it executes automatically
+only when the rollout lowers crossings and clearly grows the largest clean
+region, increases clean vertices, or shrinks the largest conflict region.
+Interactive Diagnosis reports the last search and the accepted plan's
+structural deltas. Both Interactive and Solver use this shared behavior.
+
 - `CORE GRAPH FUNCTIONS` - intersection detection, graph generation
 - `ANCHOR SCORING` - determines how "fixed" a vertex is  
 - `INCREMENTAL CROSSING DETECTION` - fast move evaluation

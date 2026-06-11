@@ -861,6 +861,148 @@
     return plans.sort(function(a, b) { return b.score - a.score; }).slice(0, 5);
   }
 
+  function regionExtensionMetrics(analysis) {
+    var conflictVertices = analysis.conflictRegions.length > 0
+      ? analysis.conflictRegions[0].vertexCount : 0;
+    return {
+      crossings: analysis.crossings,
+      cleanVertices: analysis.cleanVertices,
+      largestCleanRegion: analysis.largestCleanRegion,
+      conflictVertices: conflictVertices,
+      establishedScore: bestEstablishedScore(analysis)
+    };
+  }
+
+  function regionExtensionDelta(before, after) {
+    return {
+      crossings: before.crossings - after.crossings,
+      cleanVertices: after.cleanVertices - before.cleanVertices,
+      largestCleanRegion: after.largestCleanRegion - before.largestCleanRegion,
+      conflictVertices: before.conflictVertices - after.conflictVertices,
+      establishedScore: after.establishedScore - before.establishedScore
+    };
+  }
+
+  function translateVertices(graph, vertices, direction, distance) {
+    var positions = [];
+    for (var i = 0; i < vertices.length; i++) {
+      var index = vertices[i];
+      var node = graph.nodes[index];
+      positions.push({
+        index: index,
+        x: Math.max(0.02, Math.min(0.98, node[0] + direction[0] * distance)),
+        y: Math.max(0.02, Math.min(0.98, node[1] + direction[1] * distance))
+      });
+    }
+    return positions;
+  }
+
+  // Bounded Stage 2 search for a short coherent translation that grows a
+  // solved region or localizes the remaining conflict enough for Stage 1 to
+  // resume. Crossing damage is allowed during setup, but the bounded rollout
+  // must recover and show clear structural progress before execution.
+  function suggestRegionExtensionPlan(graph, options) {
+    options = options || {};
+    var startedAt = Date.now();
+    var timeBudgetMs = options.timeBudgetMs || 100;
+    var baseAnalysis = analyzeGraphState(graph, {});
+    var base = regionExtensionMetrics(baseAnalysis);
+    var maxGroupSize = options.maxGroupSize || 6;
+    var cleanupLimit = options.cleanupSteps || 8;
+    var damageLimit = options.damageLimit === undefined
+      ? Math.max(8, Math.ceil(base.crossings * 0.6)) : options.damageLimit;
+    var plans = baseAnalysis.directionalPlans.slice(0, options.planLimit || 5);
+    var distances = options.distances || [0.06, 0.12, 0.2];
+    var candidates = [];
+    var tested = 0;
+
+    for (var pi = 0; pi < plans.length &&
+        Date.now() - startedAt < timeBudgetMs; pi++) {
+      var plan = plans[pi];
+      var vertices = plan.vertices.slice(0, maxGroupSize);
+      if (vertices.length < 2) continue;
+
+      for (var di = 0; di < distances.length &&
+          Date.now() - startedAt < timeBudgetMs; di++) {
+        var positions = translateVertices(
+          graph, vertices, plan.direction, distances[di]);
+        var simulation = cloneGraph(graph);
+        applyGroupPositions(simulation, positions);
+        var setupAnalysis = analyzeGraphState(simulation, {});
+        var setup = regionExtensionMetrics(setupAnalysis);
+        var setupDelta = regionExtensionDelta(base, setup);
+        var immediateDamage = Math.max(0, setup.crossings - base.crossings);
+        tested++;
+        if (immediateDamage > damageLimit) continue;
+
+        var cleanupState = {};
+        var cleanupSteps = 0;
+        while (cleanupSteps < cleanupLimit &&
+            Date.now() - startedAt < timeBudgetMs) {
+          var result = minimizeStep(simulation, cleanupState);
+          if (!result.move) break;
+          cleanupSteps++;
+        }
+        var finalAnalysis = analyzeGraphState(simulation, {});
+        var finalMetrics = regionExtensionMetrics(finalAnalysis);
+        var finalDelta = regionExtensionDelta(base, finalMetrics);
+        var structuralSetup = setupDelta.largestCleanRegion >= 2 ||
+          setupDelta.cleanVertices >= 3 ||
+          setupDelta.conflictVertices >= 3;
+        var productiveHandoff = finalMetrics.crossings < base.crossings &&
+          (finalDelta.largestCleanRegion >= 2 ||
+            finalDelta.cleanVertices >= 3 ||
+            finalDelta.conflictVertices >= 3);
+        var score =
+          finalDelta.largestCleanRegion * 12 +
+          finalDelta.conflictVertices * 9 +
+          finalDelta.cleanVertices * 5 +
+          finalDelta.establishedScore * 2 +
+          finalDelta.crossings * 2 -
+          immediateDamage * 0.35 -
+          vertices.length * 0.5;
+
+        candidates.push({
+          type: 'region-extension',
+          strategy: 'stage2-region-extension',
+          objective: 'translate compatible-anchor group [' +
+            vertices.join(',') + '] to extend/localize solved structure',
+          component: vertices,
+          positions: positions,
+          direction: plan.direction,
+          distance: distances[di],
+          baseMetrics: base,
+          setupMetrics: setup,
+          finalMetrics: finalMetrics,
+          setupDelta: setupDelta,
+          finalDelta: finalDelta,
+          immediateDamage: immediateDamage,
+          cleanupSteps: cleanupSteps,
+          structuralSetup: structuralSetup,
+          productiveHandoff: productiveHandoff,
+          score: score,
+          accepted: productiveHandoff && score >= 50
+        });
+      }
+    }
+
+    candidates.sort(function(a, b) {
+      return b.score - a.score ||
+        a.immediateDamage - b.immediateDamage ||
+        a.component.length - b.component.length;
+    });
+    return {
+      type: 'region-extension-search',
+      baseMetrics: base,
+      candidatesTested: tested,
+      elapsedMs: Date.now() - startedAt,
+      timedOut: Date.now() - startedAt >= timeBudgetMs,
+      best: candidates.length > 0 && candidates[0].accepted
+        ? candidates[0] : null,
+      candidates: candidates.slice(0, 5)
+    };
+  }
+
   function recordCrossingHistory(state, crossingCount) {
     state.crossingHistory = state.crossingHistory || [];
     var lastHistory = state.crossingHistory[state.crossingHistory.length - 1];
@@ -981,6 +1123,7 @@
       oscillatingVertices: oscillatingVertices,
       activeStructuralPlan: structuralPlanSummary(state.activeStructuralPlan),
       lastStructuralPlan: state.lastStructuralPlan || null,
+      lastRegionExtensionSearch: state.lastRegionExtensionSearch || null,
       lastMinimizeAttempt: state.lastMinimizeAttempt || null,
       lastSideFlipAttempt: state.lastSideFlipAttempt || null,
       sideFlipMoves: state.sideFlipMoves || 0
@@ -1601,7 +1744,10 @@
       separator: plan.separator,
       completionCondition: plan.completionCondition,
       maxSteps: plan.maxSteps,
-      steps: plan.steps || 0
+      steps: plan.steps || 0,
+      baseMetrics: plan.baseMetrics || null,
+      setupMetrics: plan.setupMetrics || null,
+      projectedMetrics: plan.projectedMetrics || null
     };
   }
 
@@ -1620,7 +1766,10 @@
       separator: details.separator || null,
       completionCondition: details.completionCondition || null,
       maxSteps: details.maxSteps || 12,
-      steps: 0
+      steps: 0,
+      baseMetrics: details.baseMetrics || null,
+      setupMetrics: details.setupMetrics || null,
+      projectedMetrics: details.projectedMetrics || null
     };
     return state.activeStructuralPlan;
   }
@@ -1637,8 +1786,11 @@
     var plan = state.activeStructuralPlan;
     if (!plan) return;
     if (crossingCount === 0 ||
-        (plan.completionCondition === 'projected-solve' &&
-          crossingCount <= plan.projectedFinalCrossings)) {
+        (!state.pendingStructuralMoves &&
+          ((plan.completionCondition === 'projected-solve' &&
+            crossingCount <= plan.projectedFinalCrossings) ||
+           (plan.completionCondition === 'productive-handoff' &&
+            crossingCount <= plan.projectedFinalCrossings)))) {
       plan.status = 'completed';
       state.lastStructuralPlan = structuralPlanSummary(plan);
       state.activeStructuralPlan = null;
@@ -1665,7 +1817,9 @@
       toX: position.x,
       toY: position.y,
       improvement: 0,
-      strategy: 'stage2-proven-solve',
+      strategy: state.activeStructuralPlan &&
+        state.activeStructuralPlan.type === 'region-extension'
+        ? 'stage2-region-extension' : 'stage2-proven-solve',
       search: {
         reason: state.pendingStructuralReason || null,
         projectedFinalCrossings: state.activeStructuralPlan
@@ -4075,6 +4229,57 @@
         return { done: false, improved: newCount < count, move: best, count: newCount };
       }
     }
+
+    // Conservative automatic Stage 2 region extension. Try one bounded
+    // structural hypothesis per stalled crossing count, and commit only when
+    // simulation shows both meaningful region/localization progress and a
+    // productive return to Stage 1.
+    if (!state.activeStructuralPlan && graph.nodes.length <= 60 && count <= 80 &&
+        state.regionExtensionAttemptedAtCount !== count) {
+      state.regionExtensionAttemptedAtCount = count;
+      var extensionReport = suggestRegionExtensionPlan(graph, {
+        timeBudgetMs: 110,
+        cleanupSteps: 8
+      });
+      state.lastRegionExtensionSearch = extensionReport;
+      if (extensionReport.best) {
+        var extension = extensionReport.best;
+        beginStructuralPlan(state, {
+          type: 'region-extension',
+          objective: extension.objective,
+          startedAtCrossings: count,
+          projectedFinalCrossings: extension.finalMetrics.crossings,
+          movableVertices: extension.component,
+          protectedVertices: [],
+          direction: extension.direction,
+          completionCondition: 'productive-handoff',
+          maxSteps: extension.positions.length + extension.cleanupSteps + 3,
+          baseMetrics: extension.baseMetrics,
+          setupMetrics: extension.setupMetrics,
+          projectedMetrics: extension.finalMetrics
+        });
+        state.pendingStructuralMoves = extension.positions.slice();
+        state.pendingStructuralReason = extension.objective;
+        best = takePendingStructuralMove(graph, state);
+        best.search.regionExtension = {
+          distance: extension.distance,
+          immediateDamage: extension.immediateDamage,
+          cleanupSteps: extension.cleanupSteps,
+          setupDelta: extension.setupDelta,
+          finalDelta: extension.finalDelta,
+          score: extension.score
+        };
+        best.node[0] = best.toX;
+        best.node[1] = best.toY;
+        recordMove(state, best.nodeIndex, best.toX, best.toY);
+        var newCount = intersections(graph.links);
+        best.improvement = count - newCount;
+        state.stuckCount = 0;
+        state.recentAttempts = {};
+        state.finisherAttemptedAtCount = null;
+        return { done: false, improved: newCount < count, move: best, count: newCount };
+      }
+    }
     
     // Stage 1 is stuck - increment counter
     state.stuckCount = (state.stuckCount || 0) + 1;
@@ -4650,6 +4855,7 @@
   exports.analyzeEstablishedRegion = analyzeEstablishedRegion;
   exports.analyzeConflictRegions = analyzeConflictRegions;
   exports.suggestDirectionalPlans = suggestDirectionalPlans;
+  exports.suggestRegionExtensionPlan = suggestRegionExtensionPlan;
   exports.findSeparatingTriangles = findSeparatingTriangles;
   exports.suggestStage2Move = suggestStage2Move;
   exports.suggestSeparatorReshape = suggestSeparatorReshape;

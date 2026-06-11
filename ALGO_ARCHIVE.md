@@ -29,6 +29,16 @@ These are available as interactive buttons but removed from the auto solver loop
 | `findRelocateMove` | Move yellow vertices toward their weighted centroid | Allows +3 crossing increase for "reorganization"; too risky in auto mode |
 | `findConsolidateMove` | Grow largest geometric cluster by pulling in nearby vertices | Intentionally ignores crossing count; purely structural |
 
+### Stage 1b: Reducing Topological Side Flips
+- **What**: After adaptive and anchored-centroid descent are exhausted, test a
+  bounded set of degree-2-to-5 conflicting vertices on the opposite side of
+  edges between their neighbors, or inside triangles formed by their neighbors.
+- **Acceptance**: Strict immediate crossing reduction only.
+- **Budget**: At most six ranked candidates and four unique accepted moves per
+  Stage 1 run. A successful flip returns control to ordinary Stage 1 descent.
+- **Why**: Captures visually obvious "sore thumb belongs across this edge/in
+  this enclosure" moves without opening the much larger component-move search.
+
 ## Historical Approaches (No Longer in Code)
 
 ### "Repel" Strategy

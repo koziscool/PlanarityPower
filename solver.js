@@ -590,7 +590,9 @@
       recentImprovement: recentImprovement,
       stalled: crossingCount > 0 && recent.length >= 3 && recentImprovement <= 0,
       oscillatingVertices: oscillatingVertices,
-      lastMinimizeAttempt: state.lastMinimizeAttempt || null
+      lastMinimizeAttempt: state.lastMinimizeAttempt || null,
+      lastSideFlipAttempt: state.lastSideFlipAttempt || null,
+      sideFlipMoves: state.sideFlipMoves || 0
     };
   }
 
@@ -2721,6 +2723,209 @@
     return bestMove;
   }
 
+  // Stage 1b: low-degree "sore thumb" vertices often sit on the wrong side of
+  // an edge between two of their neighbors. Test only those topologically
+  // motivated side flips and accept only immediate crossing reductions.
+  function findReducingSideFlipMove(graph, state, options) {
+    state = state || {};
+    options = options || {};
+    var count = intersections(graph.links);
+    if (count === 0) return null;
+    state.sideFlipVertices = state.sideFlipVertices || {};
+    if ((state.sideFlipMoves || 0) >= (options.moveLimit || 4)) return null;
+
+    var crossingCounts = getCrossingCounts(graph);
+    var adjacency = graph.nodes.map(function() { return {}; });
+    for (var i = 0; i < graph.links.length; i++) {
+      var a = graph.nodes.indexOf(graph.links[i][0]);
+      var b = graph.nodes.indexOf(graph.links[i][1]);
+      if (a === b) continue;
+      adjacency[a][b] = true;
+      adjacency[b][a] = true;
+    }
+
+    var candidates = crossingCounts.map(function(crossings, index) {
+      var neighbors = Object.keys(adjacency[index]).map(Number);
+      var averageLength = 0;
+      neighbors.forEach(function(neighborIndex) {
+        var dx = graph.nodes[index][0] - graph.nodes[neighborIndex][0];
+        var dy = graph.nodes[index][1] - graph.nodes[neighborIndex][1];
+        averageLength += Math.sqrt(dx * dx + dy * dy);
+      });
+      return {
+        index: index,
+        crossings: crossings,
+        neighbors: neighbors,
+        degree: neighbors.length,
+        score: averageLength / Math.max(1, neighbors.length) +
+          crossings / Math.max(1, neighbors.length) * 0.02
+      };
+    }).filter(function(item) {
+      return item.crossings > 0 && item.degree >= 2 && item.degree <= 5 &&
+        !state.sideFlipVertices[item.index];
+    }).sort(function(a, b) {
+      return b.score - a.score;
+    }).slice(0, options.candidateLimit || 6);
+
+    var best = null;
+    var testedEdges = 0;
+    var testedPositions = 0;
+
+    for (var ci = 0; ci < candidates.length; ci++) {
+      var candidate = candidates[ci];
+      var node = graph.nodes[candidate.index];
+      var nodeEdges = getNodeEdges(graph, node);
+      var incidentBefore = countEdgeCrossings(graph, nodeEdges);
+
+      for (var ni = 0; ni < candidate.neighbors.length; ni++) {
+        for (var nj = ni + 1; nj < candidate.neighbors.length; nj++) {
+          var neighborA = candidate.neighbors[ni];
+          var neighborB = candidate.neighbors[nj];
+          if (!adjacency[neighborA][neighborB]) continue;
+          testedEdges++;
+
+          var edge = [graph.nodes[neighborA], graph.nodes[neighborB]];
+          var vertexSide = sideOfEdge(edge, node);
+          var sameSide = 0;
+          var oppositeSide = 0;
+          for (var otherIndex = 0; otherIndex < candidate.neighbors.length; otherIndex++) {
+            var otherNeighbor = candidate.neighbors[otherIndex];
+            if (otherNeighbor === neighborA || otherNeighbor === neighborB) continue;
+            var otherSide = sideOfEdge(edge, graph.nodes[otherNeighbor]);
+            if (Math.abs(vertexSide) < 1e-8 || Math.abs(otherSide) < 1e-8) continue;
+            if (vertexSide * otherSide > 0) sameSide++;
+            else oppositeSide++;
+          }
+          // Degree-2 vertices have only one possible neighbor edge. For higher
+          // degree vertices, require evidence that the vertex is the outlier.
+          if (candidate.degree > 2 && oppositeSide <= sameSide) continue;
+
+          var edgeLength = Math.sqrt(
+            Math.pow(edge[1][0] - edge[0][0], 2) +
+            Math.pow(edge[1][1] - edge[0][1], 2));
+          var offsets = [
+            Math.max(0.012, Math.min(0.04, edgeLength * 0.08)),
+            Math.max(0.025, Math.min(0.08, edgeLength * 0.16))
+          ];
+
+          for (var oi = 0; oi < offsets.length; oi++) {
+            var target = reflectPointAcrossEdge(node, edge, offsets[oi]);
+            if (!target || isTooClose(graph, node, target[0], target[1]) ||
+                wouldOscillate(state, candidate.index, target[0], target[1])) {
+              continue;
+            }
+            testedPositions++;
+
+            var oldX = node[0], oldY = node[1];
+            node[0] = target[0];
+            node[1] = target[1];
+            var incidentAfter = countEdgeCrossings(graph, nodeEdges);
+            node[0] = oldX;
+            node[1] = oldY;
+            var improvement = incidentBefore - incidentAfter;
+
+            if (improvement > 0 && (!best || improvement > best.improvement)) {
+              best = {
+                node: node,
+                nodeIndex: candidate.index,
+                fromX: oldX,
+                fromY: oldY,
+                toX: target[0],
+                toY: target[1],
+                improvement: improvement,
+                strategy: 'stage1b-neighbor-edge-flip',
+                search: {
+                  crossingCount: count,
+                  candidateVertices: candidates.map(function(item) { return item.index; }),
+                  testedEdges: testedEdges,
+                  testedPositions: testedPositions,
+                  neighborEdge: [neighborA, neighborB],
+                  degree: candidate.degree,
+                  incidentCrossingsBefore: incidentBefore,
+                  incidentCrossingsAfter: incidentAfter,
+                  bestImprovement: improvement
+                }
+              };
+            }
+          }
+        }
+      }
+
+      // If three neighbors form a triangle, test placing the sore-thumb
+      // vertex inside that local enclosure. This can cross multiple boundary
+      // edges at once and matches the common visual "belongs in here" move.
+      for (var ta = 0; ta < candidate.neighbors.length; ta++) {
+        for (var tb = ta + 1; tb < candidate.neighbors.length; tb++) {
+          for (var tc = tb + 1; tc < candidate.neighbors.length; tc++) {
+            var triangleA = candidate.neighbors[ta];
+            var triangleB = candidate.neighbors[tb];
+            var triangleC = candidate.neighbors[tc];
+            if (!adjacency[triangleA][triangleB] ||
+                !adjacency[triangleA][triangleC] ||
+                !adjacency[triangleB][triangleC]) {
+              continue;
+            }
+            var targetX = (graph.nodes[triangleA][0] + graph.nodes[triangleB][0] +
+              graph.nodes[triangleC][0]) / 3;
+            var targetY = (graph.nodes[triangleA][1] + graph.nodes[triangleB][1] +
+              graph.nodes[triangleC][1]) / 3;
+            if (pointInTriangle(node, graph.nodes[triangleA], graph.nodes[triangleB],
+                graph.nodes[triangleC]) ||
+                isTooClose(graph, node, targetX, targetY) ||
+                wouldOscillate(state, candidate.index, targetX, targetY)) {
+              continue;
+            }
+            testedPositions++;
+
+            var oldX = node[0], oldY = node[1];
+            node[0] = targetX;
+            node[1] = targetY;
+            var incidentAfter = countEdgeCrossings(graph, nodeEdges);
+            node[0] = oldX;
+            node[1] = oldY;
+            var improvement = incidentBefore - incidentAfter;
+
+            if (improvement > 0 && (!best || improvement > best.improvement)) {
+              best = {
+                node: node,
+                nodeIndex: candidate.index,
+                fromX: oldX,
+                fromY: oldY,
+                toX: targetX,
+                toY: targetY,
+                improvement: improvement,
+                strategy: 'stage1b-neighbor-enclosure',
+                search: {
+                  crossingCount: count,
+                  candidateVertices: candidates.map(function(item) { return item.index; }),
+                  testedEdges: testedEdges,
+                  testedPositions: testedPositions,
+                  neighborTriangle: [triangleA, triangleB, triangleC],
+                  degree: candidate.degree,
+                  incidentCrossingsBefore: incidentBefore,
+                  incidentCrossingsAfter: incidentAfter,
+                  bestImprovement: improvement
+                }
+              };
+            }
+          }
+        }
+      }
+    }
+
+    intersections(graph.links);
+    state.lastSideFlipAttempt = {
+      crossingCount: count,
+      candidateVertices: candidates.map(function(item) { return item.index; }),
+      testedEdges: testedEdges,
+      testedPositions: testedPositions,
+      bestImprovement: best ? best.improvement : 0,
+      exhausted: !best
+    };
+    if (best) best.search.finalAttempt = state.lastSideFlipAttempt;
+    return best;
+  }
+
   // Apply one strictly crossing-reducing geometric move.
   // This intentionally excludes structural, escape, clump, and zero-gain moves.
   function minimizeStep(graph, state) {
@@ -2776,7 +2981,7 @@
       state.recentAttempts = {};
       return { done: false, improved: true, move: best, count: newCount };
     }
-    
+
     // Before escaping, try anchored centroid move
     // This uses weighted centroid that prioritizes fixed/yellow neighbors
     best = findAnchoredCentroidMove(graph);
@@ -2792,6 +2997,21 @@
         if (best.improvement > 0) state.stuckCount = 0;
         return { done: false, improved: best.improvement > 0, move: best, count: newCount };
       }
+    }
+
+    // Stage 1b: after ordinary geometric descent is genuinely exhausted, try
+    // a few strictly reducing topological side flips, then return to Stage 1.
+    best = findReducingSideFlipMove(graph, state);
+    if (best) {
+      best.node[0] = best.toX;
+      best.node[1] = best.toY;
+      recordMove(state, best.nodeIndex, best.toX, best.toY);
+      state.sideFlipVertices[best.nodeIndex] = true;
+      state.sideFlipMoves = (state.sideFlipMoves || 0) + 1;
+      var newCount = intersections(graph.links);
+      state.stuckCount = 0;
+      state.recentAttempts = {};
+      return { done: false, improved: true, move: best, count: newCount };
     }
     
     // Stage 1 is stuck - increment counter
@@ -3365,6 +3585,7 @@
   exports.suggestStage2Restart = suggestStage2Restart;
   exports.applyStage2Suggestion = applyStage2Suggestion;
   exports.findAdaptiveMinimizeMove = findAdaptiveMinimizeMove;
+  exports.findReducingSideFlipMove = findReducingSideFlipMove;
   exports.minimizeStep = minimizeStep;
   exports.solverStep = solverStep;
   exports.solvePuzzle = solvePuzzle;

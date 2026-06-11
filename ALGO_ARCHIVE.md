@@ -165,6 +165,45 @@ neighbor-neighbor edges when the vertex lies opposite most remaining neighbors.
 These candidates matched the visually obvious "outlying vertex belongs on the
 other side" pattern substantially more often than high-incidence targeting.
 
+`analyzeGraphState()` also reports established-region diagnostics for each
+graph-connected clean region. Region size is measured in vertices, not pixels.
+Geometry terms report internal/boundary edge counts, internal density,
+edge-length regularity, nearest-vertex visibility relative to edge length,
+equilateral-style triangle quality, and dandelion quality around internal
+degree-7+ vertices. These are diagnostic only. In particular, a large region
+with low visibility or narrow triangles is a possible dilation candidate rather
+than evidence that further compaction is desirable.
+
+`suggestSeparatorReshape()` is a diagnostic-only Stage 2 candidate ranker. For
+a small component crossing a separating triangle boundary, it tests moving one
+triangle vertex in the direction that expands the separator around the
+component. It ranks candidates using boundary-crossing removal, resolved
+straddling, established-region growth, clean-vertex growth, crossing change,
+and a preliminary anchor-disruption penalty. Interactive reports its best
+candidate but does not enable automatic application.
+
+`analyzeGraphState()` partitions current crossing events into unresolved
+conflict regions. Events are grouped when they share vertices, or when nearby
+events touch through an abstract graph edge. Each region reports its crossing
+vertices, crossing edges, nearby non-crossing boundary vertices, and geometric
+bounds. This supports the isolation-phase diagnosis without changing solver
+behavior.
+
+Conflict-region diagnostics also report suggestion-only directional plans.
+Within one conflict region, crossing vertices are grouped when their estimated
+cheap outward directions agree. High-congestion groups are labeled dilation
+plans; other aligned groups are labeled directional-group plans. They report
+movable and protected vertices, direction, anchor estimate, and crossing
+incidence, but do not execute.
+
+The solver now has reusable structural-plan state. A plan records its objective,
+movable/protected vertices, optional direction or separator, completion
+condition, and executed step count. The first active use is deliberately
+conservative: after Stage 1, Stage 1b, and the existing finisher fail at 15 or
+fewer crossings, the solver may automatically commit a bounded Stage 2 restart
+only when its deterministic rollout projects zero crossings. Partial-progress
+restarts remain suggestion-only.
+
 - `CORE GRAPH FUNCTIONS` - intersection detection, graph generation
 - `ANCHOR SCORING` - determines how "fixed" a vertex is  
 - `INCREMENTAL CROSSING DETECTION` - fast move evaluation

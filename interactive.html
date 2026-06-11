@@ -185,6 +185,7 @@
     var minimizeStepCore = Solver.minimizeStep;
     var analyzeGraphState = Solver.analyzeGraphState;
     var suggestStage2Restart = Solver.suggestStage2Restart;
+    var suggestSeparatorReshape = Solver.suggestSeparatorReshape;
     var applyStage2Suggestion = Solver.applyStage2Suggestion;
     var findClumps = Solver.findClumps;
     var findEscapeMove = Solver.findEscapeMove;
@@ -1232,6 +1233,50 @@
         ? sideFlip.testedPositions + ' positions / ' + sideFlip.testedEdges +
           ' neighbor edges; best -' + sideFlip.bestImprovement
         : 'none yet';
+      var established = analysis.bestEstablishedRegion;
+      var establishedText = established
+        ? established.vertexCount + ' verts; score ' + established.score.toFixed(2) +
+          '; internal/boundary ' + established.internalEdges + '/' +
+          established.boundaryEdges
+        : 'none';
+      var geometryText = established
+        ? 'visibility ' + established.visibilityRatio.toFixed(2) +
+          '; edge regularity ' + Math.max(0, 1 - established.edgeLengthCV).toFixed(2) +
+          '; triangles ' + established.triangleCount +
+          ' @ ' + established.triangleQuality.toFixed(2) +
+          (established.dandelionCount > 0
+            ? '; dandelions ' + established.dandelionCount + ' @ ' +
+              established.dandelionQuality.toFixed(2) + ' [' +
+              established.dandelions.map(function(item) {
+                return 'v' + item.vertex + ':d' + item.degree;
+              }).join(', ') + ']'
+            : '')
+        : 'none';
+      var geometryClass = established &&
+        (established.visibilityRatio < 0.2 ||
+          (established.triangleCount > 0 && established.triangleQuality < 0.25))
+        ? 'warning' : 'good';
+      var conflictRegionsText = analysis.conflictRegions.length > 0
+        ? analysis.conflictRegions.slice(0, 5).map(function(region) {
+          return region.crossingCount + 'x/' + region.vertexCount + 'v [' +
+            region.vertices.join(',') + '] boundary [' +
+            region.boundaryVertices.join(',') + ']';
+        }).join('; ')
+        : 'none';
+      var structuralPlan = analysis.activeStructuralPlan || analysis.lastStructuralPlan;
+      var structuralPlanText = structuralPlan
+        ? structuralPlan.status + ' #' + structuralPlan.id + ' ' +
+          structuralPlan.type + ': ' + structuralPlan.objective +
+          '; movable [' + structuralPlan.movableVertices.join(',') + ']' +
+          '; steps ' + structuralPlan.steps
+        : 'none';
+      var directionalPlansText = analysis.directionalPlans.length > 0
+        ? analysis.directionalPlans.slice(0, 3).map(function(plan) {
+          return plan.type + ' [' + plan.vertices.join(',') + '] dir (' +
+            plan.direction[0].toFixed(2) + ',' + plan.direction[1].toFixed(2) +
+            ') anchor ' + plan.averageAnchor.toFixed(2);
+        }).join('; ')
+        : 'none';
 
       document.getElementById('diagnosis').innerHTML =
         '<div>Crossings: ' + analysis.crossings + '</div>' +
@@ -1240,6 +1285,12 @@
         '<div>Clean regions: ' + analysis.cleanRegions.length +
           ' [' + regions + ']</div>' +
         '<div>Largest clean region: ' + analysis.largestCleanRegion + '</div>' +
+        '<div>Established region: ' + establishedText + '</div>' +
+        '<div class="' + geometryClass + '">Region geometry: ' + geometryText + '</div>' +
+        '<div>Conflict regions: ' + analysis.conflictRegions.length +
+          ' | ' + conflictRegionsText + '</div>' +
+        '<div>Directional plans: ' + directionalPlansText + '</div>' +
+        '<div>Structural plan: ' + structuralPlanText + '</div>' +
         '<div>Crossing-heavy: ' + concentration + '</div>' +
         '<div>Top concentration: ' + Math.round(analysis.topCrossingShare * 100) + '%</div>' +
         '<div class="' + trendClass + '">Progress: ' + trendText + '</div>' +
@@ -1257,12 +1308,34 @@
       var box = document.getElementById('stage2-diagnosis');
       var applyButton = document.getElementById('btn-stage2-apply');
       var suggestion = puzzle && puzzle.stage2Suggestion;
+      var reshape = report && report.separatorReshape &&
+        report.separatorReshape.best;
       applyButton.disabled = !suggestion;
 
       if (!report && !suggestion) {
         box.textContent = 'No structural suggestion yet.';
         return;
       }
+      var reshapeText = reshape
+        ? '<div class="good">Diagnostic separator reshape: move v' +
+          reshape.component[0] + ' around [' + reshape.triangle.join(', ') +
+          ']</div>' +
+          '<div>Affected component: [' + reshape.affectedComponent.join(', ') +
+          ']; side ' + reshape.fromSide + ' -> ' + reshape.toSide + '</div>' +
+          '<div>Boundary crossings: ' +
+          reshape.componentBoundaryCrossingsBefore + ' -> ' +
+          reshape.componentBoundaryCrossingsAfter +
+          '; established score ' +
+          (reshape.establishedDelta >= 0 ? '+' : '') +
+          reshape.establishedDelta.toFixed(2) + '</div>' +
+          '<div>Immediate crossings: ' + reshape.immediateCrossings +
+          '; clean vertices ' + (reshape.cleanDelta >= 0 ? '+' : '') +
+          reshape.cleanDelta + '; disruption ' +
+          reshape.anchorDisruption.toFixed(2) + '</div>' +
+          '<div>Reshape search: ' + report.separatorReshape.candidatesTested +
+          ' candidates in ' + report.separatorReshape.elapsedMs + ' ms' +
+          (report.separatorReshape.timedOut ? ' (budget reached)' : '') + '</div>'
+        : '<div>No positive separator-reshape diagnostic.</div>';
       if (!suggestion) {
         var lowDegreeText = (report.lowDegreeCandidates || []).map(function(item) {
           return 'v' + item.vertex + '(d' + item.degree + ',c' + item.crossings + ')';
@@ -1274,7 +1347,8 @@
             report.candidatesTested + '</div>' +
           '<div>Time: ' + report.elapsedMs + '/' + report.timeBudgetMs + ' ms' +
             (report.timedOut ? ' (budget reached)' : '') + '</div>' +
-          '<div class="warning">No bounded restart unlocked enough progress.</div>';
+          '<div class="warning">No bounded restart unlocked enough progress.</div>' +
+          reshapeText;
         return;
       }
 
@@ -1288,7 +1362,8 @@
           ' (-' + suggestion.downstreamImprovement + ')</div>' +
         '<div>Clean vertex delta: ' +
           (suggestion.cleanDelta >= 0 ? '+' : '') + suggestion.cleanDelta + '</div>' +
-        '<div>Simulation steps: ' + suggestion.simulationSteps + '</div>';
+        '<div>Simulation steps: ' + suggestion.simulationSteps + '</div>' +
+        reshapeText;
     }
     
     function updateGlobalStats() {
@@ -1365,6 +1440,7 @@
 
       setTimeout(function() {
         var report = suggestStage2Restart(puzzle.graph);
+        report.separatorReshape = suggestSeparatorReshape(puzzle.graph);
         puzzle.stage2Report = report;
         puzzle.stage2Suggestion = report.best;
         updateStage2Diagnosis(puzzle, report);

@@ -135,6 +135,16 @@ so an awkward intermediate vertex move cannot be interrupted by Stage 1. This
 handles easy cases such as moving component `[8,17]` inside triangle
 `[2,12,16]`.
 
+`suggestContainedTriangleSolve()` handles the complementary case where the
+topology is already correct: a crossing-free separating triangle contains every
+remaining crossing in one attached interior component. The solver discards the
+exterior from the search, holds the separator fixed, and solves only the
+induced interior subgraph. Interior positions must remain distinct and inside
+the triangle. Deterministic restarts may project temporary crossing increases,
+but the complete sequence executes only when the full graph is projected to
+reach zero. The active limit is ten interior vertices and 15 crossings. This
+solves the graph-26 case inside separator `[1,3,26]`.
+
 Inside-triangle placement uses a bounded deterministic search over interior
 barycentric positions, three compact scales, and four rotations. This handles
 narrow regions where the topological side choice is clear but placing the
@@ -150,6 +160,12 @@ when a subsequent separating-triangle relocation plus at most three
 deterministic Stage 1 cleanup moves is projected to solve the graph. Active
 solver runs allow at most two of these approximately 100 ms lookahead searches
 per graph.
+
+`suggestDominantBarrierTransfer()` handles another conservative Stage 3 case:
+one crossed edge accounts for at least half the remaining crossings and has a
+small complete geometric side. It tests coherent translations of that side,
+records directional anchor support/conflict, and executes only when bounded
+deterministic cleanup projects a complete solve.
 
 The active suggestion-only Stage 2 slice uses `suggestStage2Restart()`. It
 examines at most three crossing-heavy vertices, generates at most eight direct
@@ -173,6 +189,14 @@ equilateral-style triangle quality, and dandelion quality around internal
 degree-7+ vertices. These are diagnostic only. In particular, a large region
 with low visibility or narrow triangles is a possible dilation candidate rather
 than evidence that further compaction is desirable.
+
+`suggestRegionReorganizationMove()` is a manual Interactive experiment used by
+the Compact button before the older geometric compactor. It moves one clean,
+low-boundary-anchor, non-dandelion vertex toward its internal clean neighbors.
+The move must preserve crossing count, reduce internal edge length, and retain
+minimum local visibility. Automatic periodic and local-minimum deployment were
+tested and rejected because they added runtime without a consistent solve-rate
+gain.
 
 `suggestSeparatorReshape()` is a diagnostic-only Stage 2 candidate ranker. For
 a small component crossing a separating triangle boundary, it tests moving one
@@ -214,6 +238,13 @@ only when the rollout lowers crossings and clearly grows the largest clean
 region, increases clean vertices, or shrinks the largest conflict region.
 Interactive Diagnosis reports the last search and the accepted plan's
 structural deltas. Both Interactive and Solver use this shared behavior.
+
+TurboSolver retains every geometry snapshot after a puzzle first reaches 20
+crossings. Earlier snapshots remain sparse. This makes late Stage 2/3 sequences
+and temporary setbacks fully replayable without bloating early-game batch logs.
+TurboSolver also accepts and exports a deterministic seed. Runs using the same
+seed and configuration reproduce graph generation and solver random choices, so
+solve-rate comparisons measure code changes rather than different random batches.
 
 - `CORE GRAPH FUNCTIONS` - intersection detection, graph generation
 - `ANCHOR SCORING` - determines how "fixed" a vertex is  

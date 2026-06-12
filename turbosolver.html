@@ -51,9 +51,19 @@
       color: #fff;
       font-size: 10px;
     }
+    .puzzle-header button {
+      padding: 0 3px;
+      margin-left: 4px;
+      border: 1px solid #aaa;
+      background: #555;
+      color: #fff;
+      cursor: pointer;
+      font-size: 9px;
+    }
     .puzzle.solved .puzzle-header { background: #075f18; }
     .puzzle.capped .puzzle-header { background: #765400; }
     .puzzle.stuck .puzzle-header { background: #700; }
+    .puzzle.churned .puzzle-header { background: #65356f; }
     canvas {
       display: block;
       width: 100%;
@@ -65,7 +75,9 @@
   <div class="controls">
     <label>Vertices: <input id="num-nodes" type="number" value="30" min="10" max="200"></label>
     <label>Graphs: <input id="num-graphs" type="number" value="50" min="1" max="200"></label>
+    <label>Seed: <input id="seed" type="number" value="12345" min="1" max="4294967295"></label>
     <label>Move cap: <input id="move-cap" type="number" value="400" min="1" max="5000"></label>
+    <label>Churn patience: <input id="churn-patience" type="number" value="75" min="10" max="1000"></label>
     <label>Moves/frame: <input id="moves-frame" type="number" value="10" min="1" max="100"></label>
     <label>Frame delay: <input id="frame-delay" type="number" value="30" min="0" max="1000"> ms</label>
     <button id="new-btn">New Batch</button>
@@ -90,9 +102,18 @@
     var running = false;
     var startedAt = null;
     var animationHandle = null;
+    var activeSeed = 12345;
 
     function numberValue(id, fallback) {
       return parseInt(document.getElementById(id).value, 10) || fallback;
+    }
+
+    function seededRandom(seed) {
+      var state = seed >>> 0;
+      return function() {
+        state = (state * 1664525 + 1013904223) >>> 0;
+        return state / 0x100000000;
+      };
     }
 
     function strategyCounts(history) {
@@ -101,6 +122,63 @@
         counts[move.strategy] = (counts[move.strategy] || 0) + 1;
       });
       return counts;
+    }
+
+    function graphEdges(graph) {
+      return graph.links.map(function(link) {
+        return [
+          graph.nodes.indexOf(link[0]),
+          graph.nodes.indexOf(link[1])
+        ];
+      });
+    }
+
+    function graphPositions(graph) {
+      return graph.nodes.map(function(node) {
+        return [node[0], node[1]];
+      });
+    }
+
+    function structuralMetrics(graph) {
+      var analysis = Solver.analyzeGraphState(graph, {});
+      return {
+        crossings: analysis.crossings,
+        cleanVertices: analysis.cleanVertices,
+        largestCleanRegion: analysis.largestCleanRegion,
+        conflictVertices: analysis.conflictRegions.length > 0
+          ? analysis.conflictRegions[0].vertexCount : 0,
+        establishedScore: analysis.bestEstablishedRegion
+          ? analysis.bestEstablishedRegion.score : 0
+      };
+    }
+
+    function compareMetrics(candidate, best) {
+      if (candidate.crossings !== best.crossings) {
+        return best.crossings - candidate.crossings;
+      }
+      if (candidate.largestCleanRegion !== best.largestCleanRegion) {
+        return candidate.largestCleanRegion - best.largestCleanRegion;
+      }
+      if (candidate.conflictVertices !== best.conflictVertices) {
+        return best.conflictVertices - candidate.conflictVertices;
+      }
+      if (candidate.cleanVertices !== best.cleanVertices) {
+        return candidate.cleanVertices - best.cleanVertices;
+      }
+      return candidate.establishedScore - best.establishedScore;
+    }
+
+    function snapshot(puzzle, label, metrics) {
+      return {
+        move: puzzle.moves,
+        label: label,
+        positions: graphPositions(puzzle.graph),
+        crossings: puzzle.crossings,
+        strategy: puzzle.lastStrategy,
+        movingNode: puzzle.history.length > 0
+          ? puzzle.history[puzzle.history.length - 1].vertex : null,
+        metrics: metrics
+      };
     }
 
     function createPuzzle(id, nodeCount) {
@@ -117,7 +195,7 @@
 
       var graph = Solver.scramble(Solver.planarGraph(nodeCount));
       var crossings = Solver.intersections(graph.links);
-      return {
+      var puzzle = {
         id: id,
         graph: graph,
         solverState: {},
@@ -131,8 +209,17 @@
         maxCrossings: crossings,
         minCrossings: crossings,
         lastStrategy: '-',
-        history: []
+        history: [],
+        snapshots: [],
+        bestSnapshot: null,
+        progressMetrics: null,
+        movesSinceStructuralProgress: 0
       };
+      var metrics = structuralMetrics(graph);
+      puzzle.bestSnapshot = snapshot(puzzle, 'initial', metrics);
+      puzzle.progressMetrics = metrics;
+      puzzle.snapshots.push(puzzle.bestSnapshot);
+      return puzzle;
     }
 
     function createBatch() {
@@ -142,6 +229,8 @@
       startedAt = null;
       var nodeCount = numberValue('num-nodes', 30);
       var graphCount = numberValue('num-graphs', 50);
+      activeSeed = numberValue('seed', 12345) >>> 0;
+      Math.random = seededRandom(activeSeed);
       for (var i = 0; i < graphCount; i++) {
         puzzles.push(createPuzzle(i + 1, nodeCount));
       }
@@ -181,7 +270,10 @@
       puzzle.container.className = 'puzzle ' + puzzle.status;
       puzzle.header.innerHTML =
         '<span>#' + puzzle.id + ' ' + puzzle.crossings + 'x</span>' +
-        '<span>' + puzzle.moves + 'm ' + puzzle.lastStrategy + '</span>';
+        '<span>' + puzzle.moves + 'm ' + puzzle.lastStrategy +
+          (puzzle.status === 'solved' ? '' :
+            ' <button data-replay="' + puzzle.id + '">Replay best</button>') +
+        '</span>';
       puzzle.container.title =
         'Initial: ' + puzzle.initialCrossings +
         '\nMin: ' + puzzle.minCrossings +
@@ -198,7 +290,40 @@
       puzzle.crossings = Solver.intersections(puzzle.graph.links);
     }
 
-    function stepPuzzle(puzzle, moveCap) {
+    function restoreBestSnapshot(puzzle) {
+      if (!puzzle.bestSnapshot) return;
+      puzzle.graph.nodes.forEach(function(node, index) {
+        node[0] = puzzle.bestSnapshot.positions[index][0];
+        node[1] = puzzle.bestSnapshot.positions[index][1];
+      });
+      puzzle.crossings = Solver.intersections(puzzle.graph.links);
+      puzzle.lastStrategy = 'restored-best';
+      puzzle.solverState = {};
+    }
+
+    function recordStructuralProgress(puzzle) {
+      var metrics = structuralMetrics(puzzle.graph);
+      var progress = puzzle.progressMetrics;
+      var meaningfulProgress =
+        metrics.crossings < progress.crossings ||
+        metrics.cleanVertices >= progress.cleanVertices + 2 ||
+        metrics.largestCleanRegion >= progress.largestCleanRegion + 2 ||
+        metrics.conflictVertices <= progress.conflictVertices - 2 ||
+        metrics.establishedScore >= progress.establishedScore + 2;
+      if (compareMetrics(metrics, puzzle.bestSnapshot.metrics) > 0) {
+        puzzle.bestSnapshot = snapshot(puzzle, 'structural-best', metrics);
+        puzzle.snapshots.push(puzzle.bestSnapshot);
+      }
+      if (meaningfulProgress) {
+        puzzle.progressMetrics = metrics;
+        puzzle.movesSinceStructuralProgress = 0;
+        return true;
+      }
+      puzzle.movesSinceStructuralProgress++;
+      return false;
+    }
+
+    function stepPuzzle(puzzle, moveCap, churnPatience) {
       if (puzzle.status !== 'running') return;
       if (puzzle.moves >= moveCap) {
         finishPuzzle(puzzle, 'capped');
@@ -228,12 +353,27 @@
           crossings: puzzle.crossings,
           structuralPlan: result.move.search && result.move.search.structuralPlan || null
         });
+        recordStructuralProgress(puzzle);
+        // Once the graph reaches the diagnostically important late game,
+        // retain every position. This preserves complete Stage 2/3 sequences,
+        // including temporary crossing increases, without bloating early-game
+        // batch logs.
+        if (puzzle.minCrossings <= 20 &&
+            puzzle.snapshots[puzzle.snapshots.length - 1].move !== puzzle.moves) {
+          puzzle.snapshots.push(snapshot(
+            puzzle, 'low-crossing-move', structuralMetrics(puzzle.graph)));
+        }
       }
-      if (puzzle.moves >= moveCap) finishPuzzle(puzzle, 'capped');
+      if (puzzle.moves >= moveCap) {
+        finishPuzzle(puzzle, 'capped');
+      } else if (puzzle.movesSinceStructuralProgress >= churnPatience) {
+        restoreBestSnapshot(puzzle);
+        finishPuzzle(puzzle, 'churned');
+      }
     }
 
     function updateStatus() {
-      var counts = { running: 0, solved: 0, capped: 0, stuck: 0 };
+      var counts = { running: 0, solved: 0, capped: 0, stuck: 0, churned: 0 };
       var moves = 0;
       puzzles.forEach(function(puzzle) {
         counts[puzzle.status]++;
@@ -244,6 +384,7 @@
         'Solved ' + counts.solved + '/' + puzzles.length +
         ' | Active ' + counts.running +
         ' | Capped ' + counts.capped +
+        ' | Churned ' + counts.churned +
         ' | Stuck ' + counts.stuck +
         ' | Moves ' + moves +
         ' | Elapsed ' + elapsed + 's';
@@ -253,9 +394,10 @@
       if (!running) return;
       var movesPerFrame = numberValue('moves-frame', 10);
       var moveCap = numberValue('move-cap', 400);
+      var churnPatience = numberValue('churn-patience', 75);
       for (var step = 0; step < movesPerFrame; step++) {
         puzzles.forEach(function(puzzle) {
-          stepPuzzle(puzzle, moveCap);
+          stepPuzzle(puzzle, moveCap, churnPatience);
         });
       }
       renderAll();
@@ -304,6 +446,9 @@
       var stuck = puzzles.filter(function(puzzle) {
         return puzzle.status === 'stuck';
       });
+      var churned = puzzles.filter(function(puzzle) {
+        return puzzle.status === 'churned';
+      });
       var totalMoves = puzzles.reduce(function(sum, puzzle) {
         return sum + puzzle.moves;
       }, 0);
@@ -312,7 +457,9 @@
         config: {
           nodes: numberValue('num-nodes', 30),
           graphs: puzzles.length,
+          seed: activeSeed,
           moveCap: numberValue('move-cap', 400),
+          churnPatience: numberValue('churn-patience', 75),
           movesPerFrame: numberValue('moves-frame', 10),
           frameDelayMs: numberValue('frame-delay', 30)
         },
@@ -321,6 +468,7 @@
           solved: solved.length,
           capped: capped.length,
           stuck: stuck.length,
+          churned: churned.length,
           solveRate: puzzles.length > 0 ? solved.length / puzzles.length : 0,
           totalMoves: totalMoves,
           averageMovesPerSolve: solved.length > 0
@@ -341,6 +489,14 @@
             finalCrossings: puzzle.crossings,
             minimumCrossings: puzzle.minCrossings,
             maximumCrossings: puzzle.maxCrossings,
+            movesSinceStructuralProgress: puzzle.movesSinceStructuralProgress,
+            edges: graphEdges(puzzle.graph),
+            initialSnapshot: puzzle.snapshots[0],
+            bestSnapshot: puzzle.bestSnapshot,
+            finalSnapshot: snapshot(
+              puzzle, 'final-' + puzzle.status,
+              structuralMetrics(puzzle.graph)),
+            snapshots: puzzle.snapshots,
             strategies: strategyCounts(puzzle.history),
             history: puzzle.history
           };
@@ -366,10 +522,71 @@
       URL.revokeObjectURL(link.href);
     }
 
+    function buildInteractiveReplay(puzzle) {
+      var replaySnapshots = puzzle.snapshots.slice();
+      replaySnapshots.push(snapshot(
+        puzzle, 'final-' + puzzle.status,
+        structuralMetrics(puzzle.graph)));
+      return {
+        schemaVersion: 2,
+        timestamp: new Date().toISOString(),
+        session: 'turbosolver-' + puzzle.id,
+        nodes: puzzle.graph.nodes.map(function(node) {
+          return [node[0], node[1]];
+        }),
+        edges: graphEdges(puzzle.graph),
+        currentPosition: Math.max(0, replaySnapshots.length - 2),
+        moves: puzzle.bestSnapshot ? puzzle.bestSnapshot.move : puzzle.moves,
+        selectedVertex: -1,
+        crossings: puzzle.bestSnapshot
+          ? puzzle.bestSnapshot.crossings : puzzle.crossings,
+        history: replaySnapshots.map(function(item) {
+          return {
+            positions: item.positions,
+            crossings: item.crossings,
+            strategy: item.strategy || item.label,
+            movingNode: item.movingNode,
+            move: {
+              source: 'turbosolver',
+              strategy: item.label,
+              vertex: item.movingNode,
+              number: item.move,
+              rationale: { metrics: item.metrics }
+            }
+          };
+        })
+      };
+    }
+
+    function downloadReplay(puzzle) {
+      var contents = JSON.stringify(buildInteractiveReplay(puzzle), null, 2);
+      var filename = 'turbosolver-graph-' + puzzle.id + '-replay.json';
+      if (fs) {
+        fs.writeFileSync(filename, contents);
+        document.getElementById('status').textContent += ' | Wrote ' + filename;
+        return;
+      }
+      var blob = new Blob([contents], { type: 'application/json' });
+      var link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
     document.getElementById('new-btn').addEventListener('click', createBatch);
     document.getElementById('run-btn').addEventListener('click', run);
     document.getElementById('export-btn').addEventListener('click', function() {
       exportResults(false);
+    });
+    document.getElementById('grid').addEventListener('click', function(event) {
+      var id = event.target && event.target.getAttribute('data-replay');
+      if (!id) return;
+      event.stopPropagation();
+      var puzzle = puzzles.filter(function(item) {
+        return item.id === +id;
+      })[0];
+      if (puzzle) downloadReplay(puzzle);
     });
     createBatch();
   </script>

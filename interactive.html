@@ -1518,7 +1518,8 @@
     // Run/Pause button
     document.getElementById('btn-run').addEventListener('click', start);
     
-    // Compact button - run compact/relocate moves until no more found
+    // Compact button - prefer graph-relative clean-region organization, then
+    // fall back to the older local geometric compactor.
     document.getElementById('btn-compact').addEventListener('click', function() {
       if (puzzles.length === 0) return;
       var puzzle = puzzles[0];
@@ -1526,10 +1527,15 @@
       puzzle.stage2Suggestion = null;
       updateStage2Diagnosis(puzzle, null);
       var movesApplied = 0;
-      var maxMoves = 50;  // limit to prevent infinite loops
+      var maxMoves = 12;
       
       while (movesApplied < maxMoves) {
-        var move = findCompactMove(graph);
+        var move = Solver.suggestRegionReorganizationMove(graph, {
+          candidateLimit: 5
+        });
+        if (!move) {
+          move = findCompactMove(graph);
+        }
         if (!move) {
           move = findRelocateMove(graph);
         }
@@ -1546,7 +1552,14 @@
           'algorithm', move.strategy, graph.nodes.indexOf(move.node),
           move.fromX, move.fromY, move.toX, move.toY,
           crossingsBefore, crossingsAfter, {
-            displacement: move.displacement === undefined ? null : move.displacement
+            displacement: move.displacement === undefined ? null : move.displacement,
+            regionSize: move.regionSize === undefined ? null : move.regionSize,
+            lengthReduction: move.lengthReduction === undefined
+              ? null : move.lengthReduction,
+            nearestSpacing: move.nearestSpacing === undefined
+              ? null : move.nearestSpacing,
+            boundaryAnchors: move.boundaryAnchors === undefined
+              ? null : move.boundaryAnchors
           }
         );
         logMove(puzzle.moves, moveRecord);

@@ -883,6 +883,126 @@
     };
   }
 
+  // Cheap early/middle-game organization of an already clean region. This
+  // moves one lightly anchored internal vertex toward its internal neighbors,
+  // while preserving crossings and enough local spacing to remain visible.
+  function suggestRegionReorganizationMove(graph, options) {
+    options = options || {};
+    var baseCrossings = intersections(graph.links);
+    if (baseCrossings === 0) return null;
+
+    var analysis = analyzeGraphState(graph, {});
+    var region = analysis.bestEstablishedRegion;
+    if (!region || region.vertexCount < (options.minRegionSize || 5)) return null;
+
+    var regionSet = {};
+    region.vertices.forEach(function(index) { regionSet[index] = true; });
+    var dandelionSet = {};
+    region.dandelions.forEach(function(item) { dandelionSet[item.vertex] = true; });
+    var candidates = [];
+
+    region.vertices.forEach(function(index) {
+      if (dandelionSet[index]) return;
+      var node = graph.nodes[index];
+      var neighbors = getNeighbors(graph, node);
+      var internal = neighbors.filter(function(neighbor) {
+        return regionSet[graph.nodes.indexOf(neighbor)];
+      });
+      var boundaryCount = neighbors.length - internal.length;
+      if (internal.length < 2 || boundaryCount > 1 || neighbors.length > 6) return;
+
+      var cx = 0, cy = 0;
+      internal.forEach(function(neighbor) {
+        cx += neighbor[0];
+        cy += neighbor[1];
+      });
+      cx /= internal.length;
+      cy /= internal.length;
+      var dx = cx - node[0], dy = cy - node[1];
+      var displacement = Math.sqrt(dx * dx + dy * dy);
+      if (displacement < Math.max(0.025, region.medianEdgeLength * 0.2)) return;
+      candidates.push({
+        index: index,
+        node: node,
+        internal: internal,
+        boundaryCount: boundaryCount,
+        target: [cx, cy],
+        displacement: displacement
+      });
+    });
+
+    candidates.sort(function(a, b) {
+      return a.boundaryCount - b.boundaryCount ||
+        b.displacement - a.displacement;
+    });
+    candidates = candidates.slice(0, options.candidateLimit || 5);
+
+    var fractions = options.fractions || [0.25, 0.4];
+    var minSpacing = Math.max(
+      options.minimumSpacing || 0.014,
+      Math.min(0.025, region.medianNearestSpacing * 0.65));
+    var best = null;
+
+    candidates.forEach(function(candidate) {
+      var node = candidate.node;
+      var fromX = node[0], fromY = node[1];
+      var oldLength = candidate.internal.reduce(function(sum, neighbor) {
+        var dx = neighbor[0] - fromX, dy = neighbor[1] - fromY;
+        return sum + Math.sqrt(dx * dx + dy * dy);
+      }, 0);
+
+      fractions.forEach(function(fraction) {
+        var toX = fromX + (candidate.target[0] - fromX) * fraction;
+        var toY = fromY + (candidate.target[1] - fromY) * fraction;
+        var nearest = Infinity;
+        for (var i = 0; i < graph.nodes.length; i++) {
+          if (i === candidate.index) continue;
+          var otherDx = graph.nodes[i][0] - toX;
+          var otherDy = graph.nodes[i][1] - toY;
+          nearest = Math.min(nearest,
+            Math.sqrt(otherDx * otherDx + otherDy * otherDy));
+        }
+        if (nearest < minSpacing) return;
+
+        node[0] = toX;
+        node[1] = toY;
+        var newCrossings = intersections(graph.links);
+        var newLength = candidate.internal.reduce(function(sum, neighbor) {
+          var dx = neighbor[0] - toX, dy = neighbor[1] - toY;
+          return sum + Math.sqrt(dx * dx + dy * dy);
+        }, 0);
+        node[0] = fromX;
+        node[1] = fromY;
+        if (newCrossings !== baseCrossings) return;
+
+        var lengthReduction = oldLength - newLength;
+        if (lengthReduction < 0.008) return;
+        var score = lengthReduction * 100 + nearest * 2 -
+          candidate.boundaryCount * 0.5;
+        if (!best || score > best.score) {
+          best = {
+            node: node,
+            nodeIndex: candidate.index,
+            fromX: fromX,
+            fromY: fromY,
+            toX: toX,
+            toY: toY,
+            improvement: 0,
+            strategy: 'early-region-reorganization',
+            score: score,
+            lengthReduction: lengthReduction,
+            nearestSpacing: nearest,
+            regionSize: region.vertexCount,
+            boundaryAnchors: candidate.boundaryCount
+          };
+        }
+      });
+    });
+
+    intersections(graph.links);
+    return best;
+  }
+
   function translateVertices(graph, vertices, direction, distance) {
     var positions = [];
     for (var i = 0; i < vertices.length; i++) {
@@ -994,6 +1114,233 @@
     return {
       type: 'region-extension-search',
       baseMetrics: base,
+      candidatesTested: tested,
+      elapsedMs: Date.now() - startedAt,
+      timedOut: Date.now() - startedAt >= timeBudgetMs,
+      best: candidates.length > 0 && candidates[0].accepted
+        ? candidates[0] : null,
+      candidates: candidates.slice(0, 5)
+    };
+  }
+
+  function barrierAnchorCompatibility(graph, component, direction) {
+    var componentSet = {};
+    component.forEach(function(index) { componentSet[index] = true; });
+    var support = 0;
+    var conflict = 0;
+    var neutral = 0;
+    var externalEdges = 0;
+
+    graph.links.forEach(function(link) {
+      var a = graph.nodes.indexOf(link[0]);
+      var b = graph.nodes.indexOf(link[1]);
+      var inside = componentSet[a] ? a : componentSet[b] ? b : -1;
+      var outside = inside === a ? b : inside === b ? a : -1;
+      if (inside < 0 || outside < 0 || componentSet[outside]) return;
+
+      var dx = graph.nodes[outside][0] - graph.nodes[inside][0];
+      var dy = graph.nodes[outside][1] - graph.nodes[inside][1];
+      var length = Math.sqrt(dx * dx + dy * dy);
+      if (length < 1e-8) return;
+      var alignment = (dx * direction[0] + dy * direction[1]) / length;
+      var weight = graph.nodes[outside].intersection ? 0.25 : 1;
+      externalEdges++;
+      if (alignment > 0.3) support += weight * alignment;
+      else if (alignment < -0.3) conflict += weight * -alignment;
+      else neutral += weight;
+    });
+
+    return {
+      externalEdges: externalEdges,
+      support: support,
+      conflict: conflict,
+      neutral: neutral,
+      compatible: conflict <= support + 2 || conflict <= 2.5
+    };
+  }
+
+  function barrierTranslationPositions(graph, component, direction, distance) {
+    var positions = translateVertices(graph, component, direction, distance);
+    var clipped = 0;
+    positions.forEach(function(position, index) {
+      var node = graph.nodes[component[index]];
+      var expectedX = node[0] + direction[0] * distance;
+      var expectedY = node[1] + direction[1] * distance;
+      if (Math.abs(position.x - expectedX) > 1e-8 ||
+          Math.abs(position.y - expectedY) > 1e-8) {
+        clipped++;
+      }
+    });
+    return { positions: positions, clipped: clipped };
+  }
+
+  // Conservative Stage 3 search for the common late-game case where one edge
+  // is the dominant barrier between two otherwise coherent sides. Test moving
+  // the complete smaller side as a unit, preserving its internal geometry,
+  // and commit only when deterministic cleanup projects a complete solve.
+  function suggestDominantBarrierTransfer(graph, options) {
+    options = options || {};
+    var startedAt = Date.now();
+    var timeBudgetMs = options.timeBudgetMs || 140;
+    var baseCrossings = intersections(graph.links);
+    var cleanupLimit = options.cleanupSteps || 20;
+    var maxGroupSize = options.maxGroupSize || 10;
+    var candidates = [];
+    var tested = 0;
+
+    if (baseCrossings === 0 ||
+        baseCrossings > (options.crossingLimit || 15)) {
+      return {
+        type: 'dominant-barrier-transfer-search',
+        baseCrossings: baseCrossings,
+        barriersInspected: 0,
+        candidatesTested: 0,
+        elapsedMs: 0,
+        timedOut: false,
+        best: null,
+        candidates: []
+      };
+    }
+
+    var edgeCrossings = graph.links.map(function(link, index) {
+      var count = 0;
+      for (var other = 0; other < graph.links.length; other++) {
+        if (other !== index && intersect(link, graph.links[other])) count++;
+      }
+      return { index: index, count: count };
+    }).filter(function(item) {
+      return item.count >= Math.max(2, Math.ceil(baseCrossings * 0.5));
+    }).sort(function(a, b) {
+      return b.count - a.count;
+    }).slice(0, options.barrierLimit || 3);
+
+    var directions = [];
+    for (var directionIndex = 0; directionIndex < 8; directionIndex++) {
+      var angle = directionIndex * Math.PI / 4;
+      directions.push([Math.cos(angle), Math.sin(angle)]);
+    }
+
+    for (var barrierIndex = 0; barrierIndex < edgeCrossings.length &&
+        Date.now() - startedAt < timeBudgetMs; barrierIndex++) {
+      var barrierInfo = edgeCrossings[barrierIndex];
+      var barrier = graph.links[barrierInfo.index];
+      var barrierA = graph.nodes.indexOf(barrier[0]);
+      var barrierB = graph.nodes.indexOf(barrier[1]);
+      var edgeDx = barrier[1][0] - barrier[0][0];
+      var edgeDy = barrier[1][1] - barrier[0][1];
+      var edgeLength = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy);
+      if (edgeLength < 1e-8) continue;
+      var normal = [-edgeDy / edgeLength, edgeDx / edgeLength];
+
+      [-1, 1].forEach(function(sideSign) {
+        if (Date.now() - startedAt >= timeBudgetMs) return;
+        var signedDistances = {};
+        var component = [];
+        graph.nodes.forEach(function(node, index) {
+          if (index === barrierA || index === barrierB) return;
+          var signedDistance = sideOfEdge(barrier, node) / edgeLength;
+          signedDistances[index] = signedDistance;
+          if (Math.sign(signedDistance) === sideSign) component.push(index);
+        });
+        if (component.length === 0 || component.length > maxGroupSize) return;
+
+        var crossesBarrier = false;
+        for (var linkIndex = 0; linkIndex < graph.links.length; linkIndex++) {
+          if (linkIndex !== barrierInfo.index &&
+              intersect(barrier, graph.links[linkIndex])) {
+            var linkA = graph.nodes.indexOf(graph.links[linkIndex][0]);
+            var linkB = graph.nodes.indexOf(graph.links[linkIndex][1]);
+            if (component.indexOf(linkA) >= 0 || component.indexOf(linkB) >= 0) {
+              crossesBarrier = true;
+              break;
+            }
+          }
+        }
+        if (!crossesBarrier) return;
+
+        var maxDistanceFromBarrier = component.reduce(function(maximum, index) {
+          return Math.max(maximum, Math.abs(signedDistances[index]));
+        }, 0);
+        var acrossDirection = sideSign > 0
+          ? [-normal[0], -normal[1]] : normal.slice();
+        var placements = [
+          { direction: acrossDirection, distance: maxDistanceFromBarrier + 0.025 },
+          { direction: acrossDirection, distance: maxDistanceFromBarrier + 0.06 }
+        ];
+        directions.forEach(function(direction) {
+          [0.08, 0.16, 0.28, 0.45].forEach(function(distance) {
+            placements.push({ direction: direction, distance: distance });
+          });
+        });
+
+        for (var placementIndex = 0; placementIndex < placements.length &&
+            Date.now() - startedAt < timeBudgetMs; placementIndex++) {
+          var placement = placements[placementIndex];
+          var anchors = barrierAnchorCompatibility(
+            graph, component, placement.direction);
+          if (!anchors.compatible) continue;
+          var translated = barrierTranslationPositions(
+            graph, component, placement.direction, placement.distance);
+          var simulation = cloneGraph(graph);
+          applyGroupPositions(simulation, translated.positions);
+          var immediateCrossings = intersections(simulation.links);
+          var cleanupState = {};
+          var cleanupSteps = 0;
+          while (cleanupSteps < cleanupLimit &&
+              Date.now() - startedAt < timeBudgetMs) {
+            var cleanup = findAdaptiveMinimizeMove(simulation, cleanupState, {
+              candidateLimit: 8,
+              randomSamples: 0,
+              strongImprovement: Infinity
+            });
+            if (!cleanup) break;
+            cleanup.node[0] = cleanup.toX;
+            cleanup.node[1] = cleanup.toY;
+            recordMove(cleanupState, cleanup.nodeIndex, cleanup.toX, cleanup.toY);
+            intersections(simulation.links);
+            cleanupSteps++;
+          }
+          var finalCrossings = intersections(simulation.links);
+          tested++;
+          var candidate = {
+            type: 'dominant-barrier-transfer',
+            strategy: 'stage3-dominant-barrier-transfer',
+            objective: 'transfer side [' + component.join(',') +
+              '] across dominant barrier v' + barrierA + '-v' + barrierB,
+            barrier: [barrierA, barrierB],
+            barrierEdgeIndex: barrierInfo.index,
+            barrierCrossings: barrierInfo.count,
+            barrierShare: barrierInfo.count / baseCrossings,
+            component: component,
+            positions: translated.positions,
+            direction: placement.direction,
+            distance: placement.distance,
+            clippedVertices: translated.clipped,
+            anchors: anchors,
+            baseCrossings: baseCrossings,
+            immediateCrossings: immediateCrossings,
+            immediateDamage: Math.max(0, immediateCrossings - baseCrossings),
+            finalCrossings: finalCrossings,
+            cleanupSteps: cleanupSteps,
+            accepted: finalCrossings === 0,
+            score: finalCrossings * 1000 + immediateCrossings * 2 +
+              translated.clipped * 3 + component.length
+          };
+          candidates.push(candidate);
+          if (candidate.accepted) break;
+        }
+      });
+    }
+
+    candidates.sort(function(a, b) {
+      return a.score - b.score ||
+        b.barrierShare - a.barrierShare ||
+        a.component.length - b.component.length;
+    });
+    return {
+      type: 'dominant-barrier-transfer-search',
+      baseCrossings: baseCrossings,
+      barriersInspected: edgeCrossings.length,
       candidatesTested: tested,
       elapsedMs: Date.now() - startedAt,
       timedOut: Date.now() - startedAt >= timeBudgetMs,
@@ -1123,6 +1470,8 @@
       oscillatingVertices: oscillatingVertices,
       activeStructuralPlan: structuralPlanSummary(state.activeStructuralPlan),
       lastStructuralPlan: state.lastStructuralPlan || null,
+      lastContainedTriangleSearch: state.lastContainedTriangleSearch || null,
+      lastBarrierTransferSearch: state.lastBarrierTransferSearch || null,
       lastRegionExtensionSearch: state.lastRegionExtensionSearch || null,
       lastMinimizeAttempt: state.lastMinimizeAttempt || null,
       lastSideFlipAttempt: state.lastSideFlipAttempt || null,
@@ -1255,6 +1604,227 @@
         Math.min.apply(null, y.components.map(function(c) { return c.vertices.length; }));
     });
     return triangles;
+  }
+
+  function triangleInteriorGrid(graph, triangleVertices) {
+    var a = graph.nodes[triangleVertices[0]];
+    var b = graph.nodes[triangleVertices[1]];
+    var c = graph.nodes[triangleVertices[2]];
+    var grid = [];
+    [9, 12, 15].forEach(function(divisions) {
+      for (var weightA = 1; weightA < divisions; weightA++) {
+        for (var weightB = 1; weightB < divisions - weightA; weightB++) {
+          var weightC = divisions - weightA - weightB;
+          if (weightC < 1) continue;
+          grid.push([
+            (a[0] * weightA + b[0] * weightB + c[0] * weightC) / divisions,
+            (a[1] * weightA + b[1] * weightB + c[1] * weightC) / divisions
+          ]);
+        }
+      }
+    });
+    return grid;
+  }
+
+  function containedSubgraph(graph, triangleVertices, componentVertices, positions) {
+    var allowed = {};
+    triangleVertices.concat(componentVertices).forEach(function(index) {
+      allowed[index] = true;
+    });
+    var nodes = graph.nodes.map(function(node, index) {
+      var position = positions && positions[index] ? positions[index] : node;
+      return [position[0], position[1]];
+    });
+    var links = [];
+    graph.links.forEach(function(link) {
+      var a = graph.nodes.indexOf(link[0]);
+      var b = graph.nodes.indexOf(link[1]);
+      if (allowed[a] && allowed[b]) links.push([nodes[a], nodes[b]]);
+    });
+    return { nodes: nodes, links: links };
+  }
+
+  function validContainedPosition(positions, movable, fixed, vertex, point, spacing) {
+    var vertices = movable.concat(fixed);
+    for (var i = 0; i < vertices.length; i++) {
+      var other = vertices[i];
+      if (other === vertex) continue;
+      var dx = positions[other][0] - point[0];
+      var dy = positions[other][1] - point[1];
+      if (Math.sqrt(dx * dx + dy * dy) < spacing) return false;
+    }
+    return true;
+  }
+
+  // When a clean separating triangle contains every remaining crossing, the
+  // exterior is topologically irrelevant. Solve only the induced interior
+  // subgraph, holding the triangle fixed and rejecting every position outside
+  // it. Deterministic restarts allow temporary setbacks in the full move
+  // sequence, but execution is accepted only for a projected complete solve.
+  function suggestContainedTriangleSolve(graph, options) {
+    options = options || {};
+    var startedAt = Date.now();
+    var timeBudgetMs = options.timeBudgetMs || 140;
+    var baseCrossings = intersections(graph.links);
+    var componentLimit = options.componentLimit || 10;
+    var restartLimit = options.restartLimit || 40;
+    var passLimit = options.passLimit || 24;
+    var spacing = options.spacing || 0.012;
+    var triangles = findSeparatingTriangles(graph);
+    var candidates = [];
+    var tested = 0;
+
+    if (baseCrossings === 0 ||
+        baseCrossings > (options.crossingLimit || 15)) {
+      return {
+        type: 'contained-triangle-solve-search',
+        baseCrossings: baseCrossings,
+        trianglesInspected: 0,
+        candidatesTested: 0,
+        elapsedMs: 0,
+        timedOut: false,
+        best: null,
+        candidates: []
+      };
+    }
+
+    for (var triangleIndex = 0; triangleIndex < triangles.length &&
+        Date.now() - startedAt < timeBudgetMs; triangleIndex++) {
+      var triangle = triangles[triangleIndex];
+      if (triangle.boundaryCrossings !== 0) continue;
+      var insideComponents = triangle.components.filter(function(component) {
+        return component.side === 'inside' &&
+          component.boundaryCrossings === 0 &&
+          component.vertices.length <= componentLimit;
+      });
+
+      for (var componentIndex = 0; componentIndex < insideComponents.length &&
+          Date.now() - startedAt < timeBudgetMs; componentIndex++) {
+        var component = insideComponents[componentIndex];
+        var initialSubgraph = containedSubgraph(
+          graph, triangle.vertices, component.vertices);
+        var subgraphCrossings = intersections(initialSubgraph.links);
+        if (subgraphCrossings !== baseCrossings) continue;
+
+        var grid = triangleInteriorGrid(graph, triangle.vertices);
+        var bestPositions = null;
+        var bestCrossings = baseCrossings;
+        var solvedRestart = null;
+
+        for (var restart = 0; restart < restartLimit &&
+            Date.now() - startedAt < timeBudgetMs; restart++) {
+          var positions = graph.nodes.map(function(node) {
+            return [node[0], node[1]];
+          });
+
+          for (var movableIndex = 0; movableIndex < component.vertices.length;
+              movableIndex++) {
+            var vertex = component.vertices[movableIndex];
+            for (var attempt = 0; attempt < grid.length; attempt++) {
+              var gridIndex = (restart * 23 + movableIndex * 47 + attempt * 13) %
+                grid.length;
+              var point = grid[gridIndex];
+              if (!validContainedPosition(
+                  positions, component.vertices, triangle.vertices, vertex,
+                  point, spacing)) continue;
+              positions[vertex] = point.slice();
+              break;
+            }
+          }
+
+          var currentCrossings = intersections(containedSubgraph(
+            graph, triangle.vertices, component.vertices, positions).links);
+          for (var pass = 0; pass < passLimit && currentCrossings > 0 &&
+              Date.now() - startedAt < timeBudgetMs; pass++) {
+            var improved = false;
+            for (var vertexIndex = 0; vertexIndex < component.vertices.length &&
+                Date.now() - startedAt < timeBudgetMs; vertexIndex++) {
+              var movingVertex = component.vertices[vertexIndex];
+              var vertexBest = positions[movingVertex];
+              var vertexBestCrossings = currentCrossings;
+              for (var candidateIndex = 0; candidateIndex < grid.length;
+                  candidateIndex++) {
+                var candidatePoint = grid[
+                  (candidateIndex + restart * 7) % grid.length];
+                if (!validContainedPosition(
+                    positions, component.vertices, triangle.vertices,
+                    movingVertex, candidatePoint, spacing)) continue;
+                var previous = positions[movingVertex];
+                positions[movingVertex] = candidatePoint;
+                var candidateCrossings = intersections(containedSubgraph(
+                  graph, triangle.vertices, component.vertices, positions).links);
+                positions[movingVertex] = previous;
+                tested++;
+                if (candidateCrossings < vertexBestCrossings) {
+                  vertexBestCrossings = candidateCrossings;
+                  vertexBest = candidatePoint.slice();
+                  if (candidateCrossings === 0) break;
+                }
+              }
+              positions[movingVertex] = vertexBest;
+              if (vertexBestCrossings < currentCrossings) {
+                currentCrossings = vertexBestCrossings;
+                improved = true;
+              }
+              if (currentCrossings === 0) break;
+            }
+            if (!improved) break;
+          }
+
+          if (currentCrossings < bestCrossings) {
+            bestCrossings = currentCrossings;
+            bestPositions = positions;
+          }
+          if (currentCrossings === 0) {
+            solvedRestart = restart;
+            bestPositions = positions;
+            break;
+          }
+        }
+
+        if (!bestPositions) continue;
+        var proposedPositions = component.vertices.map(function(index) {
+          return {
+            index: index,
+            x: bestPositions[index][0],
+            y: bestPositions[index][1]
+          };
+        });
+        var fullSimulation = cloneGraph(graph);
+        applyGroupPositions(fullSimulation, proposedPositions);
+        var fullCrossings = intersections(fullSimulation.links);
+        candidates.push({
+          type: 'contained-triangle-solve',
+          strategy: 'stage3-contained-triangle-solve',
+          objective: 'solve interior component [' + component.vertices.join(',') +
+            '] inside fixed separator [' + triangle.vertices.join(',') + ']',
+          triangle: triangle.vertices,
+          component: component.vertices,
+          positions: proposedPositions,
+          baseCrossings: baseCrossings,
+          subgraphCrossings: subgraphCrossings,
+          finalCrossings: fullCrossings,
+          restart: solvedRestart,
+          accepted: fullCrossings === 0,
+          score: fullCrossings * 1000 + component.vertices.length
+        });
+      }
+    }
+
+    candidates.sort(function(a, b) {
+      return a.score - b.score || a.component.length - b.component.length;
+    });
+    return {
+      type: 'contained-triangle-solve-search',
+      baseCrossings: baseCrossings,
+      trianglesInspected: triangles.length,
+      candidatesTested: tested,
+      elapsedMs: Date.now() - startedAt,
+      timedOut: Date.now() - startedAt >= timeBudgetMs,
+      best: candidates.length > 0 && candidates[0].accepted
+        ? candidates[0] : null,
+      candidates: candidates.slice(0, 5)
+    };
   }
 
   function transformComponent(graph, component, target, targetCenter, scale, rotation) {
@@ -1819,7 +2389,13 @@
       improvement: 0,
       strategy: state.activeStructuralPlan &&
         state.activeStructuralPlan.type === 'region-extension'
-        ? 'stage2-region-extension' : 'stage2-proven-solve',
+        ? 'stage2-region-extension' :
+        state.activeStructuralPlan &&
+          state.activeStructuralPlan.type === 'contained-triangle-solve'
+          ? 'stage3-contained-triangle-solve' :
+        state.activeStructuralPlan &&
+          state.activeStructuralPlan.type === 'dominant-barrier-transfer'
+          ? 'stage3-dominant-barrier-transfer' : 'stage2-proven-solve',
       search: {
         reason: state.pendingStructuralReason || null,
         projectedFinalCrossings: state.activeStructuralPlan
@@ -4100,7 +4676,7 @@
         count: newCount
       };
     }
-    
+
     best = findAdaptiveMinimizeMove(graph, state);
     
     // If we found a valid move, apply it
@@ -4118,6 +4694,107 @@
         move: attachStructuralPlan(state, best),
         count: newCount
       };
+    }
+
+    // If a clean separating triangle contains every remaining crossing, solve
+    // only that induced interior subproblem while holding the separator and
+    // exterior fixed.
+    if (!state.activeStructuralPlan && count <= 15 &&
+        state.containedTriangleAttemptedAtCount !== count) {
+      state.containedTriangleAttemptedAtCount = count;
+      var containedReport = suggestContainedTriangleSolve(graph, {
+        timeBudgetMs: 140,
+        componentLimit: 10,
+        restartLimit: 40
+      });
+      state.lastContainedTriangleSearch = containedReport;
+      if (containedReport.best) {
+        var containedSolve = containedReport.best;
+        beginStructuralPlan(state, {
+          type: 'contained-triangle-solve',
+          objective: containedSolve.objective,
+          startedAtCrossings: count,
+          projectedFinalCrossings: 0,
+          movableVertices: containedSolve.component,
+          protectedVertices: containedSolve.triangle,
+          separator: containedSolve.triangle,
+          completionCondition: 'projected-solve',
+          maxSteps: containedSolve.positions.length + 3
+        });
+        state.pendingStructuralMoves = containedSolve.positions.slice();
+        state.pendingStructuralReason = containedSolve.objective;
+        best = takePendingStructuralMove(graph, state);
+        best.search.containedTriangleSolve = {
+          triangle: containedSolve.triangle,
+          component: containedSolve.component,
+          subgraphCrossings: containedSolve.subgraphCrossings,
+          projectedFinalCrossings: containedSolve.finalCrossings,
+          restart: containedSolve.restart,
+          candidatesTested: containedReport.candidatesTested,
+          elapsedMs: containedReport.elapsedMs
+        };
+        best.node[0] = best.toX;
+        best.node[1] = best.toY;
+        recordMove(state, best.nodeIndex, best.toX, best.toY);
+        var newCount = intersections(graph.links);
+        best.improvement = count - newCount;
+        state.stuckCount = 0;
+        state.recentAttempts = {};
+        return { done: false, improved: newCount < count, move: best, count: newCount };
+      }
+    }
+
+    // Before zero-gain repositioning, try the narrowly proven late-game case
+    // where a dominant crossed edge separates one small, coherently movable
+    // side. Crossing-reducing Stage 1 moves still retain first priority.
+    if (!state.activeStructuralPlan && count <= 15 &&
+        state.barrierTransferAttemptedAtCount !== count) {
+      state.barrierTransferAttemptedAtCount = count;
+      var barrierReport = suggestDominantBarrierTransfer(graph, {
+        timeBudgetMs: 140,
+        cleanupSteps: 20,
+        maxGroupSize: 10
+      });
+      state.lastBarrierTransferSearch = barrierReport;
+      if (barrierReport.best) {
+        var barrierTransfer = barrierReport.best;
+        beginStructuralPlan(state, {
+          type: 'dominant-barrier-transfer',
+          objective: barrierTransfer.objective,
+          startedAtCrossings: count,
+          projectedFinalCrossings: 0,
+          movableVertices: barrierTransfer.component,
+          protectedVertices: barrierTransfer.barrier,
+          direction: barrierTransfer.direction,
+          separator: barrierTransfer.barrier,
+          completionCondition: 'projected-solve',
+          maxSteps: barrierTransfer.positions.length +
+            barrierTransfer.cleanupSteps + 3
+        });
+        state.pendingStructuralMoves = barrierTransfer.positions.slice();
+        state.pendingStructuralReason = barrierTransfer.objective;
+        best = takePendingStructuralMove(graph, state);
+        best.search.barrierTransfer = {
+          barrier: barrierTransfer.barrier,
+          barrierCrossings: barrierTransfer.barrierCrossings,
+          barrierShare: barrierTransfer.barrierShare,
+          component: barrierTransfer.component,
+          direction: barrierTransfer.direction,
+          distance: barrierTransfer.distance,
+          anchors: barrierTransfer.anchors,
+          immediateCrossings: barrierTransfer.immediateCrossings,
+          immediateDamage: barrierTransfer.immediateDamage,
+          projectedCleanupSteps: barrierTransfer.cleanupSteps
+        };
+        best.node[0] = best.toX;
+        best.node[1] = best.toY;
+        recordMove(state, best.nodeIndex, best.toX, best.toY);
+        var newCount = intersections(graph.links);
+        best.improvement = count - newCount;
+        state.stuckCount = 0;
+        state.recentAttempts = {};
+        return { done: false, improved: newCount < count, move: best, count: newCount };
+      }
     }
 
     // Before escaping, try anchored centroid move
@@ -4855,8 +5532,11 @@
   exports.analyzeEstablishedRegion = analyzeEstablishedRegion;
   exports.analyzeConflictRegions = analyzeConflictRegions;
   exports.suggestDirectionalPlans = suggestDirectionalPlans;
+  exports.suggestRegionReorganizationMove = suggestRegionReorganizationMove;
   exports.suggestRegionExtensionPlan = suggestRegionExtensionPlan;
+  exports.suggestDominantBarrierTransfer = suggestDominantBarrierTransfer;
   exports.findSeparatingTriangles = findSeparatingTriangles;
+  exports.suggestContainedTriangleSolve = suggestContainedTriangleSolve;
   exports.suggestStage2Move = suggestStage2Move;
   exports.suggestSeparatorReshape = suggestSeparatorReshape;
   exports.findSeparatingTriangleFinisher = findSeparatingTriangleFinisher;

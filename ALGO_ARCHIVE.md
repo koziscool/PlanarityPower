@@ -210,6 +210,13 @@ crossings through protected internal edges. Interactive applies and logs every
 scheduled vertex move separately. Full-graph boundary crossings may increase
 temporarily, but the completed target must restore the protected region.
 
+The shared solver makes one conservative automatic compaction attempt after 40
+moves without improving its best crossing count. The initial automatic
+eligibility floor is an eight-vertex region on graphs of at most 60 vertices.
+The complete schedule executes as an uninterrupted structural plan, then
+returns control to Stage 1. A new best crossing count permits a later attempt;
+the same stalled minimum is attempted only once.
+
 `suggestSeparatorReshape()` is a diagnostic-only Stage 2 candidate ranker. For
 a small component crossing a separating triangle boundary, it tests moving one
 triangle vertex in the direction that expands the separator around the

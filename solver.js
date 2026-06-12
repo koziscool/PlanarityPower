@@ -1903,6 +1903,7 @@
       lastStructuralPlan: state.lastStructuralPlan || null,
       lastContainedTriangleSearch: state.lastContainedTriangleSearch || null,
       lastBarrierTransferSearch: state.lastBarrierTransferSearch || null,
+      lastCompactionSearch: state.lastCompactionSearch || null,
       lastRegionExtensionSearch: state.lastRegionExtensionSearch || null,
       lastMinimizeAttempt: state.lastMinimizeAttempt || null,
       lastSideFlipAttempt: state.lastSideFlipAttempt || null,
@@ -2788,7 +2789,8 @@
     if (!plan) return;
     if (crossingCount === 0 ||
         (!state.pendingStructuralMoves &&
-          ((plan.completionCondition === 'projected-solve' &&
+          ((plan.completionCondition === 'compaction-complete') ||
+           (plan.completionCondition === 'projected-solve' &&
             crossingCount <= plan.projectedFinalCrossings) ||
            (plan.completionCondition === 'productive-handoff' &&
             crossingCount <= plan.projectedFinalCrossings)))) {
@@ -2821,6 +2823,9 @@
       strategy: state.activeStructuralPlan &&
         state.activeStructuralPlan.type === 'region-extension'
         ? 'stage2-region-extension' :
+        state.activeStructuralPlan &&
+          state.activeStructuralPlan.type === 'region-compaction'
+          ? 'region-compaction-' + (position.mode || 'advance') :
         state.activeStructuralPlan &&
           state.activeStructuralPlan.type === 'contained-triangle-solve'
           ? 'stage3-contained-triangle-solve' :
@@ -4546,6 +4551,9 @@
     // Try boundary positions
     for (var b = 0; b < boundaryPositions.length; b++) {
       var pos = boundaryPositions[b];
+      var boundaryDx = pos[0] - origX;
+      var boundaryDy = pos[1] - origY;
+      if (boundaryDx * boundaryDx + boundaryDy * boundaryDy < 1e-10) continue;
       if (isTooClose(graph, node, pos[0], pos[1])) continue;
       
       node[0] = pos[0];
@@ -4570,7 +4578,10 @@
     
     // Also try weighted centroid as escape target
     var wc = weightedCentroid(graph, node);
-    if (wc && !isTooClose(graph, node, wc[0], wc[1])) {
+    var centroidDx = wc ? wc[0] - origX : 0;
+    var centroidDy = wc ? wc[1] - origY : 0;
+    if (wc && centroidDx * centroidDx + centroidDy * centroidDy >= 1e-10 &&
+        !isTooClose(graph, node, wc[0], wc[1])) {
       node[0] = wc[0];
       node[1] = wc[1];
       var newCount = intersections(graph.links);
@@ -5070,6 +5081,12 @@
     state = state || {};
     state.totalMoves = (state.totalMoves || 0) + 1;
     var count = intersections(graph.links);
+    if (state.bestCrossingCount === undefined || count < state.bestCrossingCount) {
+      state.bestCrossingCount = count;
+      state.movesSinceCrossingProgress = 0;
+    } else {
+      state.movesSinceCrossingProgress = (state.movesSinceCrossingProgress || 0) + 1;
+    }
     recordCrossingHistory(state, count);
     updateStructuralPlan(state, count);
     
@@ -5106,6 +5123,73 @@
         move: attachStructuralPlan(state, best),
         count: newCount
       };
+    }
+
+    // One conservative compaction attempt per stalled crossing minimum. The
+    // complete advance/repair schedule runs as a structural plan so Stage 1
+    // cannot interrupt the temporary geometry.
+    if (!state.disableCompaction && !state.activeStructuralPlan &&
+        graph.nodes.length <= 60 &&
+        state.movesSinceCrossingProgress >= 40 &&
+        state.compactionAttemptedAtBestCrossings !== state.bestCrossingCount) {
+      state.compactionAttemptedAtBestCrossings = state.bestCrossingCount;
+      var compactionReport = suggestRegionCompactionPlan(graph, {
+        timeBudgetMs: 300,
+        cleanupSteps: 12,
+        minRegionSize: 8
+      });
+      state.lastCompactionSearch = compactionReport;
+      if (compactionReport && compactionReport.best) {
+        var compaction = compactionReport.best;
+        beginStructuralPlan(state, {
+          type: 'region-compaction',
+          objective: compaction.reason,
+          startedAtCrossings: count,
+          projectedFinalCrossings: compaction.immediateCrossings,
+          movableVertices: compaction.component,
+          protectedVertices: compaction.component,
+          completionCondition: 'compaction-complete',
+          maxSteps: compaction.scheduledMoves.length + 2,
+          baseMetrics: {
+            crossings: count,
+            regionSize: compaction.component.length
+          },
+          projectedMetrics: {
+            crossings: compaction.immediateCrossings,
+            scale: compaction.scale,
+            peakScheduledCrossings: compaction.peakScheduledCrossings
+          }
+        });
+        state.pendingStructuralMoves = compaction.scheduledMoves.map(function(move) {
+          return {
+            index: move.index,
+            x: move.x,
+            y: move.y,
+            mode: move.mode
+          };
+        });
+        state.pendingStructuralReason = compaction.reason;
+        best = takePendingStructuralMove(graph, state);
+        best.search.compaction = {
+          scale: compaction.scale,
+          regionSize: compaction.component.length,
+          sequenceLength: compaction.scheduledMoves.length,
+          peakScheduledCrossings: compaction.peakScheduledCrossings,
+          protectedCrossings: compaction.protectedCrossings,
+          boundaryCrossings: compaction.boundaryCrossings
+        };
+        best.node[0] = best.toX;
+        best.node[1] = best.toY;
+        recordMove(state, best.nodeIndex, best.toX, best.toY);
+        var newCount = intersections(graph.links);
+        best.improvement = count - newCount;
+        return {
+          done: false,
+          improved: newCount < count,
+          move: best,
+          count: newCount
+        };
+      }
     }
 
     best = findAdaptiveMinimizeMove(graph, state);
@@ -5402,11 +5486,19 @@
     // Try escape move
     var escape = findEscapeMove(graph);
     if (escape) {
+      if (wouldOscillate(state, escape.nodeIndex, escape.toX, escape.toY)) {
+        state.oscillatingVertices = state.oscillatingVertices || {};
+        state.oscillatingVertices[escape.nodeIndex] = true;
+        escape = null;
+      }
+    }
+    if (escape) {
       // Track this vertex as recently attempted
       state.recentAttempts[escape.nodeIndex] = (state.recentAttempts[escape.nodeIndex] || 0) + 1;
       
       escape.node[0] = escape.toX;
       escape.node[1] = escape.toY;
+      recordMove(state, escape.nodeIndex, escape.toX, escape.toY);
       var newCount = intersections(graph.links);
       return {
         done: false,

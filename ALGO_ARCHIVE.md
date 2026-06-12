@@ -198,6 +198,18 @@ minimum local visibility. Automatic periodic and local-minimum deployment were
 tested and rejected because they added runtime without a consistent solve-rate
 gain.
 
+`suggestRegionCompactionPlan()` is the first region-scale compaction experiment.
+Interactive exposes it through separate Find/Apply Compaction Plan controls; it
+is not called by the automatic solver. The planner treats the strongest current
+clean region as a known planar embedding and builds a compact in-place target.
+Exact affine targets receive small local adjustments that preserve internal
+planarity while restoring recognizable local triangle relationships. The move
+scheduler builds a connected compact core, prefers frontier vertices supported
+by already placed neighbors, and enters repair mode when recent moves introduce
+crossings through protected internal edges. Interactive applies and logs every
+scheduled vertex move separately. Full-graph boundary crossings may increase
+temporarily, but the completed target must restore the protected region.
+
 `suggestSeparatorReshape()` is a diagnostic-only Stage 2 candidate ranker. For
 a small component crossing a separating triangle boundary, it tests moving one
 triangle vertex in the direction that expands the separator around the

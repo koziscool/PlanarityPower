@@ -133,6 +133,11 @@
       <button id="btn-compact">Compact</button>
       <button id="btn-consolidate">Consolidate</button>
 
+      <div class="section-label">Region Compaction</div>
+      <button id="btn-compaction-suggest">Find Compaction Plan</button>
+      <button id="btn-compaction-apply" disabled>Apply Compaction Plan</button>
+      <div id="compaction-diagnosis" class="diagnosis">No compaction plan yet.</div>
+
       <div class="section-label">History</div>
       <div class="history-row">
         <button id="btn-back">&larr;</button>
@@ -1382,6 +1387,44 @@
         '<div>Simulation steps: ' + suggestion.simulationSteps + '</div>' +
         reshapeText;
     }
+
+    function updateCompactionDiagnosis(puzzle, report) {
+      var box = document.getElementById('compaction-diagnosis');
+      var button = document.getElementById('btn-compaction-apply');
+      var plan = puzzle && puzzle.compactionSuggestion;
+      button.disabled = !plan;
+      if (!report || !plan) {
+        box.textContent = report
+          ? 'No region-scale compaction plan found.'
+          : 'No compaction plan yet.';
+        return;
+      }
+      box.innerHTML =
+        '<div>Region: [' + plan.component.join(', ') + ']</div>' +
+        '<div>Scale: ' + plan.scale.toFixed(2) +
+          '; direction (' + plan.direction[0].toFixed(2) + ',' +
+          plan.direction[1].toFixed(2) + '); distance ' +
+          plan.distance.toFixed(2) + '</div>' +
+        '<div>Area reduction: ' + Math.round(plan.areaReduction * 100) + '%</div>' +
+        '<div>Internally planar growth: ' + plan.baseRegionSize + ' -> ' +
+          plan.projectedRegionSize + ' (' +
+          (plan.regionGrowth >= 0 ? '+' : '') + plan.regionGrowth + ')</div>' +
+        '<div>Immediate crossings: ' + plan.immediateCrossings +
+          ' (+' + plan.immediateDamage + ' damage)</div>' +
+        '<div>Protected/internal-edge crossings: ' +
+          plan.protectedCrossings + '; boundary crossings: ' +
+          plan.boundaryCrossings + '</div>' +
+        '<div>Scheduled moves: ' + plan.scheduledMoves.length +
+          '; peak scheduled crossings: ' + plan.peakScheduledCrossings + '</div>' +
+        '<div>After bounded Stage 1: ' + plan.finalCrossings +
+          '; established score ' +
+          (plan.establishedDelta >= 0 ? '+' : '') +
+          plan.establishedDelta.toFixed(2) + '</div>' +
+        '<div>Score: ' + plan.score.toFixed(1) +
+          '; tested ' + report.candidatesTested +
+          ' in ' + report.elapsedMs + 'ms' +
+          (report.timedOut ? ' (budget reached)' : '') + '</div>';
+    }
     
     function updateGlobalStats() {
       puzzles.forEach(function(p) {
@@ -1513,6 +1556,70 @@
       renderPuzzle(puzzle);
       updateStatus();
       console.log('Applied Stage 2 suggestion:', before + ' -> ' + after + ' immediate crossings');
+    });
+
+    document.getElementById('btn-compaction-suggest').addEventListener('click', function() {
+      if (puzzles.length === 0 || running) return;
+      var puzzle = puzzles[0];
+      var button = document.getElementById('btn-compaction-suggest');
+      button.disabled = true;
+      button.textContent = 'Analyzing...';
+      setTimeout(function() {
+        var report = Solver.suggestRegionCompactionPlan(puzzle.graph, {
+          timeBudgetMs: 400,
+          cleanupSteps: 12
+        });
+        puzzle.compactionReport = report;
+        puzzle.compactionSuggestion = report && report.best;
+        updateCompactionDiagnosis(puzzle, report);
+        renderPuzzle(puzzle);
+        console.log('Compaction suggestion report:', report);
+        button.disabled = false;
+        button.textContent = 'Find Compaction Plan';
+      }, 0);
+    });
+
+    document.getElementById('btn-compaction-apply').addEventListener('click', function() {
+      if (puzzles.length === 0) return;
+      var puzzle = puzzles[0];
+      var plan = puzzle.compactionSuggestion;
+      if (!plan) return;
+      var before = intersections(puzzle.graph.links);
+      plan.scheduledMoves.forEach(function(scheduled, index) {
+        var node = puzzle.graph.nodes[scheduled.index];
+        var fromX = node[0], fromY = node[1];
+        var crossingsBefore = intersections(puzzle.graph.links);
+        node[0] = scheduled.x;
+        node[1] = scheduled.y;
+        var crossingsAfter = intersections(puzzle.graph.links);
+        puzzle.moves++;
+        puzzle.lastStrategy = 'region-compaction-' + scheduled.mode;
+        var moveRecord = makeMoveRecord(
+          'algorithm', puzzle.lastStrategy, scheduled.index,
+          fromX, fromY, scheduled.x, scheduled.y,
+          crossingsBefore, crossingsAfter, {
+            reason: plan.reason,
+            sequenceStep: index + 1,
+            sequenceLength: plan.scheduledMoves.length,
+            mode: scheduled.mode,
+            placedNeighbors: scheduled.placedNeighbors,
+            protectedCrossings: scheduled.protectedCrossings,
+            boundaryCrossings: scheduled.boundaryCrossings,
+            scale: plan.scale
+          });
+        logMove(puzzle.moves, moveRecord);
+        saveState(puzzle, moveRecord);
+      });
+      var after = intersections(puzzle.graph.links);
+      puzzle.status = 'running';
+      puzzle.solverState = {};
+      puzzle.count = after;
+      puzzle.compactionSuggestion = null;
+      puzzle.compactionReport = null;
+      updateCompactionDiagnosis(puzzle, null);
+      saveStateToFile(puzzle);
+      renderPuzzle(puzzle);
+      updateStatus();
     });
     
     // Run/Pause button

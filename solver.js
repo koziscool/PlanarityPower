@@ -1003,6 +1003,437 @@
     return best;
   }
 
+  function regionBounds(graph, vertices) {
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    vertices.forEach(function(index) {
+      var node = graph.nodes[index];
+      minX = Math.min(minX, node[0]);
+      minY = Math.min(minY, node[1]);
+      maxX = Math.max(maxX, node[0]);
+      maxY = Math.max(maxY, node[1]);
+    });
+    return {
+      minX: minX,
+      minY: minY,
+      maxX: maxX,
+      maxY: maxY,
+      width: maxX - minX,
+      height: maxY - minY,
+      area: Math.max(1e-8, (maxX - minX) * (maxY - minY)),
+      center: [(minX + maxX) / 2, (minY + maxY) / 2]
+    };
+  }
+
+  function internalRegionCrossings(graph, vertices) {
+    var set = {};
+    vertices.forEach(function(index) { set[index] = true; });
+    var links = graph.links.filter(function(link) {
+      return set[graph.nodes.indexOf(link[0])] &&
+        set[graph.nodes.indexOf(link[1])];
+    });
+    return intersections(links);
+  }
+
+  function regionCrossingProfile(graph, vertices) {
+    var set = {};
+    vertices.forEach(function(index) { set[index] = true; });
+    var profile = {
+      protectedCrossings: 0,
+      boundaryCrossings: 0,
+      externalCrossings: 0
+    };
+    for (var a = 0; a < graph.links.length; a++) {
+      for (var b = a + 1; b < graph.links.length; b++) {
+        if (!intersect(graph.links[a], graph.links[b])) continue;
+        var a0 = graph.nodes.indexOf(graph.links[a][0]);
+        var a1 = graph.nodes.indexOf(graph.links[a][1]);
+        var b0 = graph.nodes.indexOf(graph.links[b][0]);
+        var b1 = graph.nodes.indexOf(graph.links[b][1]);
+        var aInternal = set[a0] && set[a1];
+        var bInternal = set[b0] && set[b1];
+        var aTouches = set[a0] || set[a1];
+        var bTouches = set[b0] || set[b1];
+        if (aInternal || bInternal) profile.protectedCrossings++;
+        else if (aTouches || bTouches) profile.boundaryCrossings++;
+        else profile.externalCrossings++;
+      }
+    }
+    profile.total = profile.protectedCrossings +
+      profile.boundaryCrossings + profile.externalCrossings;
+    return profile;
+  }
+
+  // Starting from a known internally planar region, greedily absorb connected
+  // vertices whose addition preserves the induced region's internal planarity.
+  function growInternallyPlanarRegion(graph, seedVertices) {
+    var region = seedVertices.slice();
+    var set = {};
+    region.forEach(function(index) { set[index] = true; });
+    var changed = true;
+    while (changed) {
+      changed = false;
+      var candidates = [];
+      graph.links.forEach(function(link) {
+        var a = graph.nodes.indexOf(link[0]);
+        var b = graph.nodes.indexOf(link[1]);
+        if (set[a] && !set[b]) candidates.push(b);
+        if (set[b] && !set[a]) candidates.push(a);
+      });
+      candidates = candidates.filter(function(index, position) {
+        return candidates.indexOf(index) === position;
+      });
+      for (var i = 0; i < candidates.length; i++) {
+        var proposed = region.concat([candidates[i]]);
+        if (internalRegionCrossings(graph, proposed) === 0) {
+          region = proposed;
+          set[candidates[i]] = true;
+          changed = true;
+        }
+      }
+    }
+    return region;
+  }
+
+  function compactRegionPositions(graph, vertices, center, scale) {
+    var bounds = regionBounds(graph, vertices);
+    var positions = [];
+    for (var i = 0; i < vertices.length; i++) {
+      var index = vertices[i];
+      var node = graph.nodes[index];
+      var x = center[0] + (node[0] - bounds.center[0]) * scale;
+      var y = center[1] + (node[1] - bounds.center[1]) * scale;
+      if (x < 0.02 || x > 0.98 || y < 0.02 || y > 0.98) return null;
+      positions.push({ index: index, x: x, y: y });
+    }
+    return positions;
+  }
+
+  // Exact affine targets can place an internal edge directly through an
+  // exterior edge or vertex. Nudge targets locally while preserving internal
+  // planarity, analogous to a player restoring recognizable local triangles.
+  function relaxCompactRegionPositions(graph, vertices, positions) {
+    var simulation = cloneGraph(graph);
+    applyGroupPositions(simulation, positions);
+    var targetByVertex = {};
+    positions.forEach(function(position) {
+      targetByVertex[position.index] = {
+        index: position.index,
+        x: position.x,
+        y: position.y
+      };
+    });
+    var offsets = [[0, 0]];
+    [0.015, 0.03, 0.05].forEach(function(radius) {
+      for (var direction = 0; direction < 8; direction++) {
+        var angle = direction * Math.PI / 4;
+        offsets.push([Math.cos(angle) * radius, Math.sin(angle) * radius]);
+      }
+    });
+
+    for (var pass = 0; pass < 3; pass++) {
+      vertices.forEach(function(index) {
+        var node = simulation.nodes[index];
+        var affine = targetByVertex[index];
+        var best = null;
+        offsets.forEach(function(offset) {
+          var x = affine.x + offset[0], y = affine.y + offset[1];
+          if (x < 0.02 || x > 0.98 || y < 0.02 || y > 0.98) return;
+          var fromX = node[0], fromY = node[1];
+          node[0] = x;
+          node[1] = y;
+          if (internalRegionCrossings(simulation, vertices) !== 0) {
+            node[0] = fromX;
+            node[1] = fromY;
+            return;
+          }
+          var profile = regionCrossingProfile(simulation, vertices);
+          var deviation = Math.sqrt(
+            Math.pow(x - affine.x, 2) + Math.pow(y - affine.y, 2));
+          var score = profile.protectedCrossings * 100 +
+            profile.boundaryCrossings * 4 + profile.total + deviation * 20;
+          node[0] = fromX;
+          node[1] = fromY;
+          if (!best || score < best.score) {
+            best = { x: x, y: y, score: score };
+          }
+        });
+        if (best) {
+          node[0] = best.x;
+          node[1] = best.y;
+        }
+      });
+    }
+    return vertices.map(function(index) {
+      return {
+        index: index,
+        x: simulation.nodes[index][0],
+        y: simulation.nodes[index][1]
+      };
+    });
+  }
+
+  function regionNeighborMap(graph, vertices) {
+    var set = {};
+    var neighbors = {};
+    vertices.forEach(function(index) {
+      set[index] = true;
+      neighbors[index] = [];
+    });
+    graph.links.forEach(function(link) {
+      var a = graph.nodes.indexOf(link[0]);
+      var b = graph.nodes.indexOf(link[1]);
+      if (set[a] && set[b]) {
+        neighbors[a].push(b);
+        neighbors[b].push(a);
+      }
+    });
+    return neighbors;
+  }
+
+  function protectedCrossingVertices(graph, vertices) {
+    var set = {};
+    var affected = {};
+    vertices.forEach(function(index) { set[index] = true; });
+    for (var a = 0; a < graph.links.length; a++) {
+      for (var b = a + 1; b < graph.links.length; b++) {
+        if (!intersect(graph.links[a], graph.links[b])) continue;
+        var ends = [
+          graph.nodes.indexOf(graph.links[a][0]),
+          graph.nodes.indexOf(graph.links[a][1]),
+          graph.nodes.indexOf(graph.links[b][0]),
+          graph.nodes.indexOf(graph.links[b][1])
+        ];
+        var aInternal = set[ends[0]] && set[ends[1]];
+        var bInternal = set[ends[2]] && set[ends[3]];
+        if (!aInternal && !bInternal) continue;
+        ends.forEach(function(index) {
+          if (set[index]) affected[index] = true;
+        });
+      }
+    }
+    return affected;
+  }
+
+  // Order moves toward one known compact target. Advance moves prefer vertices
+  // supported by already placed neighbors. When the frontier introduces
+  // crossings through protected internal edges, repair moves prioritize the
+  // remaining vertices incident to that disruption.
+  function scheduleRegionCompaction(graph, vertices, positions) {
+    var targetByVertex = {};
+    positions.forEach(function(position) {
+      targetByVertex[position.index] = position;
+    });
+    var simulation = cloneGraph(graph);
+    var neighborMap = regionNeighborMap(simulation, vertices);
+    var remaining = {};
+    var placed = {};
+    vertices.forEach(function(index) { remaining[index] = true; });
+    var baseProfile = regionCrossingProfile(simulation, vertices);
+    var schedule = [];
+
+    while (Object.keys(remaining).length > 0) {
+      var currentProfile = regionCrossingProfile(simulation, vertices);
+      var repairVertices = currentProfile.protectedCrossings >
+        baseProfile.protectedCrossings
+        ? protectedCrossingVertices(simulation, vertices) : {};
+      var best = null;
+
+      Object.keys(remaining).forEach(function(key) {
+        var index = +key;
+        var node = simulation.nodes[index];
+        var target = targetByVertex[index];
+        var fromX = node[0], fromY = node[1];
+        node[0] = target.x;
+        node[1] = target.y;
+        var profile = regionCrossingProfile(simulation, vertices);
+        node[0] = fromX;
+        node[1] = fromY;
+        var placedNeighbors = neighborMap[index].filter(function(neighbor) {
+          return placed[neighbor];
+        }).length;
+        var remainingNeighbors = neighborMap[index].filter(function(neighbor) {
+          return remaining[neighbor] && neighbor !== index;
+        }).length;
+        var repairPriority = repairVertices[index] ? 1 : 0;
+        var score =
+          profile.protectedCrossings * 100 +
+          profile.boundaryCrossings * 4 +
+          profile.total -
+          repairPriority * 45 -
+          placedNeighbors * 12 -
+          remainingNeighbors * 2;
+        var candidate = {
+          index: index,
+          x: target.x,
+          y: target.y,
+          score: score,
+          mode: Object.keys(repairVertices).length > 0 && repairPriority
+            ? 'repair' : 'advance',
+          placedNeighbors: placedNeighbors,
+          protectedCrossings: profile.protectedCrossings,
+          boundaryCrossings: profile.boundaryCrossings,
+          totalCrossings: profile.total
+        };
+        if (!best || candidate.score < best.score) best = candidate;
+      });
+
+      if (!best) break;
+      simulation.nodes[best.index][0] = best.x;
+      simulation.nodes[best.index][1] = best.y;
+      delete remaining[best.index];
+      placed[best.index] = true;
+      schedule.push(best);
+    }
+    return {
+      moves: schedule,
+      finalProfile: regionCrossingProfile(simulation, vertices),
+      finalCrossings: intersections(simulation.links)
+    };
+  }
+
+  // Suggestion-only region-scale compaction. The final target is a uniformly
+  // scaled copy of an internally planar region, so its internal topology is
+  // preserved. Temporary full-graph crossings are allowed. Bounded Stage 1
+  // rollout estimates whether the cleared space enables region growth.
+  function suggestRegionCompactionPlan(graph, options) {
+    options = options || {};
+    var startedAt = Date.now();
+    var timeBudgetMs = options.timeBudgetMs || 320;
+    var baseAnalysis = analyzeGraphState(graph, {});
+    var region = baseAnalysis.bestEstablishedRegion;
+    if (!region || region.vertexCount < (options.minRegionSize || 6)) {
+      return {
+        type: 'region-compaction-search',
+        baseCrossings: baseAnalysis.crossings,
+        region: region ? region.vertices : [],
+        candidatesTested: 0,
+        elapsedMs: Date.now() - startedAt,
+        timedOut: false,
+        best: null,
+        candidates: []
+      };
+    }
+
+    var vertices = region.vertices.slice();
+    if (internalRegionCrossings(graph, vertices) !== 0) return null;
+    var bounds = regionBounds(graph, vertices);
+    var baseProfile = regionCrossingProfile(graph, vertices);
+    var baseGrown = growInternallyPlanarRegion(graph, vertices);
+    var directions = [[0, 0]];
+    var scales = options.scales || [0.35, 0.5, 0.65];
+    var distances = [0];
+    var cleanupLimit = options.cleanupSteps || 12;
+    var candidates = [];
+    var tested = 0;
+
+    for (var di = 0; di < directions.length &&
+        Date.now() - startedAt < timeBudgetMs; di++) {
+      var direction = directions[di];
+      var directionDistances = di === 0 ? [0] : distances;
+      for (var distanceIndex = 0; distanceIndex < directionDistances.length &&
+          Date.now() - startedAt < timeBudgetMs; distanceIndex++) {
+        var distance = directionDistances[distanceIndex];
+        var center = [
+          bounds.center[0] + direction[0] * distance,
+          bounds.center[1] + direction[1] * distance
+        ];
+        for (var si = 0; si < scales.length &&
+            Date.now() - startedAt < timeBudgetMs; si++) {
+          var positions = compactRegionPositions(
+            graph, vertices, center, scales[si]);
+          if (!positions) continue;
+          positions = relaxCompactRegionPositions(graph, vertices, positions);
+          var scheduled = scheduleRegionCompaction(graph, vertices, positions);
+          var simulation = cloneGraph(graph);
+          applyGroupPositions(simulation, positions);
+          if (internalRegionCrossings(simulation, vertices) !== 0) continue;
+
+          var setupCrossings = intersections(simulation.links);
+          var setupProfile = regionCrossingProfile(simulation, vertices);
+          var protectedAllowance = options.protectedCrossingAllowance === undefined
+            ? 2 : options.protectedCrossingAllowance;
+          if (setupProfile.protectedCrossings >
+              baseProfile.protectedCrossings + protectedAllowance) {
+            continue;
+          }
+          var cleanupState = {};
+          var cleanupSteps = 0;
+          while (cleanupSteps < cleanupLimit &&
+              Date.now() - startedAt < timeBudgetMs) {
+            var result = minimizeStep(simulation, cleanupState);
+            if (!result.move) break;
+            cleanupSteps++;
+          }
+          var finalAnalysis = analyzeGraphState(simulation, {});
+          var grown = growInternallyPlanarRegion(simulation, vertices);
+          var targetBounds = regionBounds(simulation, vertices);
+          var areaReduction = 1 - targetBounds.area / bounds.area;
+          var regionGrowth = grown.length - baseGrown.length;
+          var crossingRecovery = baseAnalysis.crossings - finalAnalysis.crossings;
+          var establishedDelta = bestEstablishedScore(finalAnalysis) -
+            bestEstablishedScore(baseAnalysis);
+          var score = regionGrowth * 30 + crossingRecovery * 4 +
+            establishedDelta * 3 + areaReduction * 12 -
+            Math.max(0, setupCrossings - baseAnalysis.crossings) * 0.12 -
+            setupProfile.protectedCrossings * 8;
+          var accepted = setupProfile.protectedCrossings <=
+              baseProfile.protectedCrossings + protectedAllowance &&
+            areaReduction >= 0.5;
+          tested++;
+          candidates.push({
+            type: 'region-compaction',
+            strategy: 'region-compaction',
+            reason: 'compact internally planar region [' + vertices.join(',') +
+              '] at scale ' + scales[si].toFixed(2),
+            component: vertices,
+            positions: positions,
+            scheduledMoves: scheduled.moves,
+            direction: direction,
+            distance: distance,
+            scale: scales[si],
+            baseCrossings: baseAnalysis.crossings,
+            immediateCrossings: setupCrossings,
+            immediateDamage: Math.max(0, setupCrossings - baseAnalysis.crossings),
+            protectedCrossings: setupProfile.protectedCrossings,
+            boundaryCrossings: setupProfile.boundaryCrossings,
+            peakScheduledCrossings: scheduled.moves.reduce(function(maximum, move) {
+              return Math.max(maximum, move.totalCrossings);
+            }, baseAnalysis.crossings),
+            finalCrossings: finalAnalysis.crossings,
+            downstreamImprovement: baseAnalysis.crossings - finalAnalysis.crossings,
+            cleanupSteps: cleanupSteps,
+            baseRegionSize: baseGrown.length,
+            projectedRegionSize: grown.length,
+            regionGrowth: regionGrowth,
+            areaReduction: areaReduction,
+            establishedDelta: establishedDelta,
+            accepted: accepted,
+            score: score
+          });
+        }
+      }
+    }
+
+    candidates.sort(function(a, b) {
+      return b.score - a.score ||
+        b.regionGrowth - a.regionGrowth ||
+        b.areaReduction - a.areaReduction ||
+        a.finalCrossings - b.finalCrossings;
+    });
+    return {
+      type: 'region-compaction-search',
+      baseCrossings: baseAnalysis.crossings,
+      region: vertices,
+      baseRegionSize: baseGrown.length,
+      candidatesTested: tested,
+      elapsedMs: Date.now() - startedAt,
+      timedOut: Date.now() - startedAt >= timeBudgetMs,
+      best: candidates.length > 0 && candidates[0].accepted
+        ? candidates[0] : null,
+      candidates: candidates.slice(0, 5)
+    };
+  }
+
   function translateVertices(graph, vertices, direction, distance) {
     var positions = [];
     for (var i = 0; i < vertices.length; i++) {
@@ -5533,6 +5964,7 @@
   exports.analyzeConflictRegions = analyzeConflictRegions;
   exports.suggestDirectionalPlans = suggestDirectionalPlans;
   exports.suggestRegionReorganizationMove = suggestRegionReorganizationMove;
+  exports.suggestRegionCompactionPlan = suggestRegionCompactionPlan;
   exports.suggestRegionExtensionPlan = suggestRegionExtensionPlan;
   exports.suggestDominantBarrierTransfer = suggestDominantBarrierTransfer;
   exports.findSeparatingTriangles = findSeparatingTriangles;

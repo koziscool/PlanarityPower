@@ -1298,7 +1298,7 @@
   function suggestRegionCompactionPlan(graph, options) {
     options = options || {};
     var startedAt = Date.now();
-    var timeBudgetMs = options.timeBudgetMs || 320;
+    var timeBudgetMs = options.timeBudgetMs || 600;
     var baseAnalysis = analyzeGraphState(graph, {});
     var region = baseAnalysis.bestEstablishedRegion;
     if (!region || region.vertexCount < (options.minRegionSize || 6)) {
@@ -1319,9 +1319,14 @@
     var bounds = regionBounds(graph, vertices);
     var baseProfile = regionCrossingProfile(graph, vertices);
     var baseGrown = growInternallyPlanarRegion(graph, vertices);
-    var directions = [[0, 0]];
+    // Manual play repeatedly showed compaction is "translate + tighten",
+    // not in-place tighten alone. Cardinal sweep of small translations lets
+    // the planner pick a center for the tightened region.
+    var directions = options.directions || [
+      [0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]
+    ];
     var scales = options.scales || [0.35, 0.5, 0.65];
-    var distances = [0];
+    var distances = options.distances || [0.12, 0.2];
     var cleanupLimit = options.cleanupSteps || 12;
     var candidates = [];
     var tested = 0;
@@ -1458,12 +1463,14 @@
     var timeBudgetMs = options.timeBudgetMs || 100;
     var baseAnalysis = analyzeGraphState(graph, {});
     var base = regionExtensionMetrics(baseAnalysis);
-    var maxGroupSize = options.maxGroupSize || 6;
-    var cleanupLimit = options.cleanupSteps || 8;
+    // Manual play repeatedly translated 8-15 vertex coherent groups by
+    // 0.15-0.45, accepting damage well above the prior 0.6*base floor of 8.
+    var maxGroupSize = options.maxGroupSize || 12;
+    var cleanupLimit = options.cleanupSteps || 16;
     var damageLimit = options.damageLimit === undefined
-      ? Math.max(8, Math.ceil(base.crossings * 0.6)) : options.damageLimit;
+      ? Math.max(15, Math.ceil(base.crossings * 0.8)) : options.damageLimit;
     var plans = baseAnalysis.directionalPlans.slice(0, options.planLimit || 5);
-    var distances = options.distances || [0.06, 0.12, 0.2];
+    var distances = options.distances || [0.06, 0.12, 0.2, 0.3, 0.45];
     var candidates = [];
     var tested = 0;
 
@@ -1640,7 +1647,9 @@
       }
       return { index: index, count: count };
     }).filter(function(item) {
-      return item.count >= Math.max(2, Math.ceil(baseCrossings * 0.5));
+      // Floor of 1 lets the function handle the unambiguous 1-crossing case
+      // (a single edge IS the dominant barrier when only one crossing remains).
+      return item.count >= Math.max(1, Math.ceil(baseCrossings * 0.5));
     }).sort(function(a, b) {
       return b.count - a.count;
     }).slice(0, options.barrierLimit || 3);
@@ -4694,49 +4703,22 @@
     return move;
   }
 
-  // Focused Stage 1 descent. Rank a small set of problematic vertices, try
-  // deterministic positions first, then spend a small random budget only when
-  // needed. Returns null when the bounded search finds no reducing move.
-  function findAdaptiveMinimizeMove(graph, state, options) {
-    state = state || {};
-    options = options || {};
-
-    var count = intersections(graph.links);
-    if (count === 0) return null;
-
-    var crossingCounts = getCrossingCounts(graph);
-    var candidateLimit = options.candidateLimit || Math.min(8, graph.nodes.length);
-    var randomSamples = options.randomSamples === undefined ? 5 : options.randomSamples;
-    var strongImprovement = options.strongImprovement ||
-      Math.max(3, Math.ceil(count * 0.03));
-    var repeatedMoves = {};
-
-    (state.recentMoves || []).forEach(function(move) {
-      repeatedMoves[move.nodeIndex] = (repeatedMoves[move.nodeIndex] || 0) + 1;
-    });
-
-    var ranked = [];
-    for (var i = 0; i < graph.nodes.length; i++) {
-      if (crossingCounts[i] === 0) continue;
-      var degree = getNodeEdges(graph, graph.nodes[i]).length;
-      var repeatPenalty = repeatedMoves[i] || 0;
-      ranked.push({
-        index: i,
-        node: graph.nodes[i],
-        crossings: crossingCounts[i],
-        degree: degree,
-        score: crossingCounts[i] * 2 + crossingCounts[i] / Math.max(1, degree) - repeatPenalty
-      });
-    }
-    ranked.sort(function(a, b) { return b.score - a.score; });
-    ranked = ranked.slice(0, candidateLimit);
+  // Shared descent pass: test a candidate list against a per-vertex probe
+  // spec (centroid, half-centroid, N local directions at a shared random
+  // angle, and optional random samples). Used by both the main list and the
+  // big list inside findAdaptiveMinimizeMove.
+  function runDescentPass(ctx, candidates, spec) {
+    var graph = ctx.graph;
+    var state = ctx.state;
+    var strongImprovement = ctx.strongImprovement;
+    var theta = ctx.theta;
+    var prefix = spec.strategyPrefix;
 
     var bestMove = null;
     var bestImprovement = 0;
     var positionsTested = 0;
     var deterministicTested = 0;
     var randomTested = 0;
-    var verticesTested = 0;
 
     function testPosition(item, edges, crossingsBefore, x, y, strategy) {
       x = Math.max(0.02, Math.min(0.98, x));
@@ -4769,16 +4751,16 @@
       return bestImprovement >= strongImprovement;
     }
 
-    // Deterministic pass: centroids and small local moves on ranked vertices.
-    for (var r = 0; r < ranked.length; r++) {
-      var item = ranked[r];
+    // Deterministic phase: centroid, half-centroid, then N evenly-spaced
+    // local probes rotated by the shared per-call random angle.
+    for (var r = 0; r < candidates.length; r++) {
+      var item = candidates[r];
       var node = item.node;
       var edges = getNodeEdges(graph, node);
       var crossingsBefore = countEdgeCrossings(graph, edges);
       var neighbors = getNeighbors(graph, node);
-      verticesTested++;
 
-      if (neighbors.length > 0) {
+      if (spec.centroid && neighbors.length > 0) {
         var cx = 0, cy = 0;
         for (var n = 0; n < neighbors.length; n++) {
           cx += neighbors[n][0];
@@ -4788,59 +4770,152 @@
         cy /= neighbors.length;
 
         deterministicTested++;
-        if (testPosition(item, edges, crossingsBefore, cx, cy, 'adaptive-centroid')) break;
-        deterministicTested++;
-        if (testPosition(item, edges, crossingsBefore,
-            node[0] + (cx - node[0]) * 0.5,
-            node[1] + (cy - node[1]) * 0.5,
-            'adaptive-centroid-half')) break;
+        if (testPosition(item, edges, crossingsBefore, cx, cy, prefix + 'centroid')) break;
+        if (spec.half) {
+          deterministicTested++;
+          if (testPosition(item, edges, crossingsBefore,
+              node[0] + (cx - node[0]) * 0.5,
+              node[1] + (cy - node[1]) * 0.5,
+              prefix + 'centroid-half')) break;
+        }
       }
 
-      var directions = [
-        [1, 0], [-1, 0], [0, 1], [0, -1],
-        [1, 1], [1, -1], [-1, 1], [-1, -1]
-      ];
-      for (var d = 0; d < directions.length; d++) {
+      var step = (Math.PI * 2) / spec.localDirs;
+      for (var d = 0; d < spec.localDirs; d++) {
+        var angle = theta + d * step;
         deterministicTested++;
         if (testPosition(item, edges, crossingsBefore,
-            node[0] + directions[d][0] * 0.04,
-            node[1] + directions[d][1] * 0.04,
-            'adaptive-local')) break;
+            node[0] + Math.cos(angle) * 0.04,
+            node[1] + Math.sin(angle) * 0.04,
+            prefix + 'local')) break;
       }
       if (bestImprovement >= strongImprovement) break;
     }
 
-    // Random pass only if deterministic candidates did not find a strong move.
-    if (bestImprovement < strongImprovement) {
-      for (var r = 0; r < ranked.length; r++) {
-        var item = ranked[r];
-        var edges = getNodeEdges(graph, item.node);
-        var crossingsBefore = countEdgeCrossings(graph, edges);
-        for (var s = 0; s < randomSamples; s++) {
+    // Random phase fires only if the deterministic phase did not clear the
+    // short-circuit threshold.
+    if (bestImprovement < strongImprovement && spec.randomSamples > 0) {
+      for (var r2 = 0; r2 < candidates.length; r2++) {
+        var item2 = candidates[r2];
+        var edges2 = getNodeEdges(graph, item2.node);
+        var crossingsBefore2 = countEdgeCrossings(graph, edges2);
+        for (var s = 0; s < spec.randomSamples; s++) {
           randomTested++;
-          if (testPosition(item, edges, crossingsBefore,
+          if (testPosition(item2, edges2, crossingsBefore2,
               0.05 + Math.random() * 0.9,
               0.05 + Math.random() * 0.9,
-              'adaptive-random')) break;
+              prefix + 'random')) break;
         }
         if (bestImprovement >= strongImprovement) break;
       }
     }
 
-    var attempt = {
-      crossingCount: count,
-      candidateVertices: ranked.map(function(item) { return item.index; }),
-      verticesTested: verticesTested,
+    return {
+      move: bestMove,
       positionsTested: positionsTested,
       deterministicTested: deterministicTested,
       randomTested: randomTested,
+      bestImprovement: bestImprovement
+    };
+  }
+
+  // Focused Stage 1 descent. Two disjoint candidate lists per call:
+  //   - Main list: top 18 by score, cheap probe (centroid + half + 3 local + 1 random).
+  //   - Big list: top 12 by score, expensive probe (centroid + half + 8 local
+  //     + 5 random). Fires once every `bigListInterval` calls (default 8).
+  // The same score (crossings*2 + crossings/degree - repeatPenalty) ranks
+  // both lists; the big list takes the top slice, the main list takes the
+  // next slice. A random angle is sampled per call and shared by both lists'
+  // local probes. Short-circuit on strongImprovement resets the big-list
+  // counter so we don't fire it again until we're back in slow-grind.
+  function findAdaptiveMinimizeMove(graph, state, options) {
+    state = state || {};
+    options = options || {};
+
+    var count = intersections(graph.links);
+    if (count === 0) return null;
+
+    var bigListLimit = options.bigListLimit || 12;
+    var mainListLimit = options.mainListLimit || 18;
+    var bigListInterval = options.bigListInterval || 8;
+    var strongImprovement = options.strongImprovement ||
+      Math.max(3, Math.ceil(count * 0.03));
+
+    var crossingCounts = getCrossingCounts(graph);
+    var repeatedMoves = {};
+    (state.recentMoves || []).forEach(function(move) {
+      repeatedMoves[move.nodeIndex] = (repeatedMoves[move.nodeIndex] || 0) + 1;
+    });
+
+    var ranked = [];
+    for (var i = 0; i < graph.nodes.length; i++) {
+      if (crossingCounts[i] === 0) continue;
+      var degree = getNodeEdges(graph, graph.nodes[i]).length;
+      var repeatPenalty = repeatedMoves[i] || 0;
+      ranked.push({
+        index: i,
+        node: graph.nodes[i],
+        crossings: crossingCounts[i],
+        degree: degree,
+        score: crossingCounts[i] * 2 + crossingCounts[i] / Math.max(1, degree) - repeatPenalty
+      });
+    }
+    ranked.sort(function(a, b) { return b.score - a.score; });
+
+    // Big list temporarily disabled — main list draws from the full top of
+    // the ranked pool. runDescentPass + big-list spec retained for re-enable.
+    var mainList = ranked.slice(0, mainListLimit);
+
+    var theta = Math.random() * Math.PI * 2;
+
+    var ctx = {
+      graph: graph,
+      state: state,
+      count: count,
+      strongImprovement: strongImprovement,
+      theta: theta
+    };
+
+    var listKind = 'main';
+    var candidatesUsed = mainList;
+    var result = runDescentPass(ctx, mainList, {
+      centroid: true,
+      half: true,
+      localDirs: 3,
+      randomSamples: 1,
+      strategyPrefix: 'adaptive-'
+    });
+
+    var attempt = {
+      crossingCount: count,
+      listKind: listKind,
+      candidateVertices: candidatesUsed.map(function(item) { return item.index; }),
+      positionsTested: result.positionsTested,
+      deterministicTested: result.deterministicTested,
+      randomTested: result.randomTested,
       strongImprovementTarget: strongImprovement,
-      bestImprovement: bestImprovement,
-      exhausted: !bestMove
+      bestImprovement: result.bestImprovement,
+      theta: theta,
+      exhausted: !result.move
     };
     state.lastMinimizeAttempt = attempt;
-    if (bestMove) bestMove.search = attempt;
-    return bestMove;
+
+    // Rolling per-call stats for later inspection.
+    state.adaptiveStatsBuffer = state.adaptiveStatsBuffer || [];
+    state.adaptiveStatsBuffer.push({
+      kind: listKind,
+      candidates: candidatesUsed.length,
+      positionsTested: result.positionsTested,
+      foundMove: !!result.move,
+      improvement: result.bestImprovement,
+      crossingsBefore: count
+    });
+    if (state.adaptiveStatsBuffer.length > 100) {
+      state.adaptiveStatsBuffer.shift();
+    }
+
+    if (result.move) result.move.search = attempt;
+    return result.move;
   }
 
   // Stage 1b: low-degree "sore thumb" vertices often sit on the wrong side of
@@ -5128,15 +5203,19 @@
     // One conservative compaction attempt per stalled crossing minimum. The
     // complete advance/repair schedule runs as a structural plan so Stage 1
     // cannot interrupt the temporary geometry.
+    // Manual play showed compaction unlocks at low crossings well before the
+    // 40-stuck threshold — fire earlier when count <= 20.
+    var compactionStalled = state.movesSinceCrossingProgress >= 40 ||
+        (count <= 20 && state.movesSinceCrossingProgress >= 15);
     if (!state.disableCompaction && !state.activeStructuralPlan &&
         graph.nodes.length <= 60 &&
-        state.movesSinceCrossingProgress >= 40 &&
+        compactionStalled &&
         state.compactionAttemptedAtBestCrossings !== state.bestCrossingCount) {
       state.compactionAttemptedAtBestCrossings = state.bestCrossingCount;
       var compactionReport = suggestRegionCompactionPlan(graph, {
-        timeBudgetMs: 300,
+        timeBudgetMs: 600,
         cleanupSteps: 12,
-        minRegionSize: 8
+        minRegionSize: 5
       });
       state.lastCompactionSearch = compactionReport;
       if (compactionReport && compactionReport.best) {
@@ -5266,9 +5345,9 @@
         state.barrierTransferAttemptedAtCount !== count) {
       state.barrierTransferAttemptedAtCount = count;
       var barrierReport = suggestDominantBarrierTransfer(graph, {
-        timeBudgetMs: 140,
-        cleanupSteps: 20,
-        maxGroupSize: 10
+        timeBudgetMs: 250,
+        cleanupSteps: 30,
+        maxGroupSize: 16
       });
       state.lastBarrierTransferSearch = barrierReport;
       if (barrierReport.best) {
@@ -5430,8 +5509,8 @@
         state.regionExtensionAttemptedAtCount !== count) {
       state.regionExtensionAttemptedAtCount = count;
       var extensionReport = suggestRegionExtensionPlan(graph, {
-        timeBudgetMs: 110,
-        cleanupSteps: 8
+        timeBudgetMs: 200,
+        cleanupSteps: 16
       });
       state.lastRegionExtensionSearch = extensionReport;
       if (extensionReport.best) {

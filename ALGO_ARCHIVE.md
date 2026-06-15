@@ -283,5 +283,154 @@ Interactive mode intentionally supports pausing the shared solver before
 Stage 2/escape so a user can intervene. This is configuration of the shared
 solver, not a separate algorithm chain.
 
+### June 2026 compaction + region-extension tune-up
+
+Observed across four 30-vertex failure-graph manual solves: every productive
+manual phase combined coherent directional translation of an 8-15 vertex group
+with spread reduction; unlocks frequently happened at low crossings (5-15) that
+the prior solver hit before any structural function could fire.
+
+Changes applied:
+
+- `suggestRegionCompactionPlan`: enabled translation. Previously hardcoded to
+  `directions = [[0,0]]` with `distances = [0]`, so compaction only tightened
+  in place. Default is now cardinal sweep with `distances = [0.12, 0.2]`. Time
+  budget bumped 320 → 600 ms.
+- Compaction call-site (`solverStep`): `minRegionSize` 8 → 5 to let smaller
+  clean regions seed compaction. Added an earlier trigger when crossings ≤ 20
+  and `movesSinceCrossingProgress ≥ 15`, alongside the existing ≥ 40 trigger.
+- `suggestRegionExtensionPlan`: `maxGroupSize` 6 → 12, `cleanupSteps` 8 → 16,
+  `damageLimit` floor 8 → 15 and multiplier 0.6 → 0.8, `distances` expanded
+  with 0.3 and 0.45 to match observed manual translation magnitudes. Call-site
+  time budget 110 → 200 ms.
+- `suggestDominantBarrierTransfer`: barrier-candidate filter floor lowered from
+  `Math.max(2, ...)` to `Math.max(1, ...)`. The prior floor of 2 excluded the
+  unambiguous single-crossing case where one edge IS the dominant barrier by
+  definition (100% of crossings). Manual play on graph 16 (seed 88881) showed
+  the textbook pattern: one crossing, one 5-vertex side, translate across.
+
+### June 2026 cache-invalidation after compaction (REVERTED)
+
+Tried: in `updateStructuralPlan`, when a `region-compaction` plan completes,
+invalidate the count-based caches for the downstream structural strategies
+(`regionExtensionAttemptedAtCount`, `barrierTransferAttemptedAtCount`,
+`containedTriangleAttemptedAtCount`, `finisherAttemptedAtCount`). Motivation:
+graph 47 (seed 55599) showed compaction running 12 moves and finishing at 10
+crossings, after which `stage2-region-extension` never fired because the
+count-based cache rejected re-attempt at the same crossing count.
+
+Result on seed 55599: solve rate dropped 37/50 → 32/50. Graph 47 recovered
+(targeted fix worked) but 7 graphs newly failed (9, 16, 20, 21, 26, 27, 43).
+**Churn count went 1 → 9**, the signature of structural strategies firing
+repeatedly post-compaction, committing candidates, and unwinding. Several
+newly-failed graphs ended at very low residual (graph 13 at 1, graph 21 at 3),
+consistent with overshoot from extra structural attempts.
+
+Reverted. The cache invalidation as written was indiscriminate — it fired on
+every compaction completion regardless of whether the post-compaction geometry
+was meaningfully different to the structural strategies. Future direction: the
+Faraday-cage framing is still correct (compaction creates the conditions for
+extension and triangle triage), but the trigger needs to be more selective —
+probably driven by the post-compaction geometry itself (e.g. a new clean
+separating triangle appeared) rather than by the compaction completion event.
+
+### June 2026 barrier-transfer cap loosening
+
+Observed on graph 50 (seed 55599): textbook barrier-edge case, all 5 crossings
+on edge 20-21, but `suggestDominantBarrierTransfer` never fired. Diagnosis: the
+function defines `component` as every vertex on one side of the barrier
+(excluding endpoints) and rejects if `component.length > maxGroupSize`. Graph 50
+splits 13/15 across the diagonal — both sides exceed the prior cap of 10.
+
+Changes at the solverStep call-site:
+
+- `maxGroupSize` 10 → 16. Covers up-to-30-vertex graphs where the barrier splits
+  the canvas more evenly than the original "small wrong-side group" cases.
+- `cleanupSteps` 20 → 30. Translating 13+ vertices across a barrier produces
+  more transitional disorder than 5-vertex flips; cleanup needs more budget.
+- `timeBudgetMs` 140 → 250. More component × placement combinations to test.
+
+The internal "flip-entire-side" design remains: still does not consider
+sub-components. If raising the cap turns out to find solves on graph 50 but
+regresses elsewhere, the next iteration is smarter subset selection (start with
+vertices whose neighborhoods straddle the barrier, grow by anchor compatibility).
+
+### June 2026 Stage 1 inner-loop trade: fewer offsets, more candidates
+
+`findAdaptiveMinimizeMove` was testing 8 vertices × (2 centroid + 8 cardinal/diagonal
+offsets) = 80 deterministic positions per step. The 8 fixed offsets at step 0.04
+had diminishing returns — after the centroid + half-centroid tests, eight tiny
+nearby perturbations on the same vertex rarely add information.
+
+Changes:
+
+- `candidateLimit` 8 → 12 (~50% more ranked vertices considered per step).
+- Offsets cut from 8 cardinal/diagonal directions to 3 evenly-spaced unit
+  vectors at 0°, 120°, 240°. Cleaner symmetric coverage, less redundancy.
+
+Per-step deterministic test count: 12 × (2 + 3) = 60 (down from 80, ~25%
+cheaper). Hypothesis: more shots at finding the productive vertex outweigh the
+lost redundant local probes around already-considered vertices. Stage 1 stays
+anchor-free in the inner loop by design — anchor scoring stays in
+`findAnchoredCentroidMove` and downstream fallbacks.
+
+Caveat: pulling lower-crossings vertices into the candidate pool may cause
+descent to fail the strong-improvement target more often, falling through to
+fallbacks earlier. That's a feature, not a bug — pairs with planned
+opportunistic-compaction fallback work.
+
+### June 2026 Stage 1 two-list split: cheap main list, periodic big list
+
+`findAdaptiveMinimizeMove` was refactored to test two disjoint candidate lists
+per call. Motivation: at 80v, runs across seeds 25–30 showed `strongImprovement`
+early-exit firing only ~27% of the time, so candidate-list size directly drove
+runtime. Eyeballing also suggested longer candidate lists produced better moves
+— but high-crossings high-degree vertices kept hogging the top of the ranking
+even when their crossings are a consequence of neighbor positions, not their
+own position.
+
+Shape:
+
+- **Main list** — top 18 by score (`crossings*2 + crossings/degree -
+  repeatPenalty`), excluding the big-list slice. Cheap probe per candidate:
+  centroid + half-centroid + 3 local directions + 1 random sample. Strategy
+  tags `adaptive-centroid`, `adaptive-centroid-half`, `adaptive-local`,
+  `adaptive-random`.
+- **Big list** — top 12 by the same score. Expensive probe: centroid +
+  half-centroid + 8 local directions + 5 random samples. Fires every 8th call
+  (the other 7 use the main list). Strategy tags `big-centroid`,
+  `big-centroid-half`, `big-local`, `big-random`.
+- **Lists are disjoint per call** — the same ranked list is sliced into the
+  two; vertices float between them as their crossings change across moves.
+- **Random angle θ** — one uniform-random angle drawn per call, used by both
+  lists for the local-direction probes (`θ + k * 2π/N`). Counters de-aliasing
+  across consecutive calls on candidates that didn't move.
+- **Counter** — `state.bigListCounter` increments each main-list call, resets
+  to 0 after a big-list call OR after any short-circuit (strongImprovement
+  cleared).
+
+Per-call worst-case cost: main list 18 × 6 = 108 tests; big list 12 × 18 =
+216 tests. Averaged over a 9-call cycle: ~120/call, comparable to the prior
+12 × 10 = 120/call.
+
+Refactor split out a shared `runDescentPass(ctx, candidates, spec)` helper so
+both lists use the same testPosition/oscillation/bounds logic with different
+probe specs. Also added `state.adaptiveStatsBuffer` as a rolling buffer (last
+100 calls) of `{kind, candidates, positionsTested, foundMove, improvement,
+crossingsBefore}` so we can audit firing cadence and big-list utility.
+
+Open: cadence of every-8 is a guess; needs tuning against `adaptiveStatsBuffer`.
+The big list's utility is the empirical question — earlier finding was that
+high-degree-vertex moves are usually unproductive, but the richer probe set
+(8 directions + 5 random) might recover the rare profitable case.
+
+**Status (June 2026): big list currently disabled.** First run showed clear
+30v turbo regression — at small scale the disjoint split starves the main
+list, since most or all crossed vertices end up in the big list. Bigger
+graphs showed structural improvement but solve-rate didn't beat the prior
+baseline. Reverted to single main list (top 18 from full ranked pool, cheap
+probe spec, random θ retained) while we evaluate scale-aware sizing. The
+`runDescentPass` helper and big-list spec stay in place for re-enable.
+
 *Last updated: June 2026*
 *To restore a removed strategy, retrieve it from Git history and benchmark it before reconnecting it.*

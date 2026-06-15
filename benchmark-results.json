@@ -1,100 +1,66 @@
 {
-  "timestamp": "2026-06-10T02:23:14.041Z",
+  "timestamp": "2026-06-14T03:53:53.814Z",
   "config": {
-    "numPuzzles": 10,
-    "nodeCount": 20
+    "numPuzzles": 5,
+    "nodeCount": 30
   },
   "summary": {
-    "solved": 9,
-    "stuck": 1,
-    "solveRate": "90.0%",
-    "avgMovesPerSolve": "65.8"
+    "solved": 2,
+    "stuck": 3,
+    "solveRate": "40.0%",
+    "avgMovesPerSolve": "174.0"
   },
   "strategyTotals": {
-    "bottleneck-centroid-fast": 73,
-    "bottleneck-sample-fast": 75,
-    "grid": 94,
-    "anchored-centroid": 56,
-    "escape-boundary": 479,
-    "escape-random": 21,
-    "grow": 2,
-    "escape-centroid": 185,
-    "finisher": 15,
-    "random-fast": 7,
-    "centroid-fast": 1,
-    "local": 7,
-    "barrierMove-2vertex": 4
+    "adaptive-centroid": 227,
+    "adaptive-local": 123,
+    "adaptive-centroid-half": 44,
+    "adaptive-random": 19,
+    "anchored-centroid": 131,
+    "escape-boundary": 114,
+    "region-compaction-advance": 40,
+    "region-compaction-repair": 19,
+    "finisher-separating-triangle": 17,
+    "escape-centroid": 21,
+    "stage3-dominant-barrier-transfer": 20,
+    "escape-random": 27,
+    "stage2-region-extension": 14,
+    "stage1b-neighbor-enclosure": 3
   },
   "results": [
     {
       "puzzle": 0,
-      "solved": true,
-      "moves": 38,
-      "initialCrossings": 207,
-      "finalCrossings": 0
+      "solved": false,
+      "moves": 500,
+      "initialCrossings": 517,
+      "finalCrossings": 4
     },
     {
       "puzzle": 1,
       "solved": true,
-      "moves": 21,
-      "initialCrossings": 236,
+      "moves": 97,
+      "initialCrossings": 446,
       "finalCrossings": 0
     },
     {
       "puzzle": 2,
       "solved": false,
-      "moves": 500,
-      "initialCrossings": 208,
-      "finalCrossings": 5
+      "moves": 351,
+      "initialCrossings": 643,
+      "finalCrossings": 9
     },
     {
       "puzzle": 3,
       "solved": true,
-      "moves": 21,
-      "initialCrossings": 220,
+      "moves": 251,
+      "initialCrossings": 447,
       "finalCrossings": 0
     },
     {
       "puzzle": 4,
-      "solved": true,
-      "moves": 22,
-      "initialCrossings": 249,
-      "finalCrossings": 0
-    },
-    {
-      "puzzle": 5,
-      "solved": true,
-      "moves": 30,
-      "initialCrossings": 262,
-      "finalCrossings": 0
-    },
-    {
-      "puzzle": 6,
-      "solved": true,
-      "moves": 71,
-      "initialCrossings": 265,
-      "finalCrossings": 0
-    },
-    {
-      "puzzle": 7,
-      "solved": true,
-      "moves": 262,
-      "initialCrossings": 216,
-      "finalCrossings": 0
-    },
-    {
-      "puzzle": 8,
-      "solved": true,
-      "moves": 92,
-      "initialCrossings": 204,
-      "finalCrossings": 0
-    },
-    {
-      "puzzle": 9,
-      "solved": true,
-      "moves": 35,
-      "initialCrossings": 200,
-      "finalCrossings": 0
+      "solved": false,
+      "moves": 234,
+      "initialCrossings": 587,
+      "finalCrossings": 28
     }
   ]
 }

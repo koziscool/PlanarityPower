@@ -419,6 +419,80 @@ probe specs. Also added `state.adaptiveStatsBuffer` as a rolling buffer (last
 100 calls) of `{kind, candidates, positionsTested, foundMove, improvement,
 crossingsBefore}` so we can audit firing cadence and big-list utility.
 
+### June 2026 topology-cache refactor (REVERTED)
+
+Profiling showed many repeated `graph.nodes.indexOf(...)` calls, so we tested
+a behavior-preserving topology cache for immutable graph structure: node index
+map, link endpoint indices, incident edges, neighbor lists, and adjacency.
+The cache deliberately did not store crossing state because crossings depend
+on coordinates and must be invalidated after every vertex move.
+
+Result: not worth keeping in the 30-vertex benchmark. The cache removed direct
+`graph.nodes.indexOf(...)` calls, but the cost of building and consulting cache
+objects, especially inside short-lived simulation clones, outweighed the saved
+linear scans at this graph size.
+
+Benchmarks on seed `12345` after the stage-gating/compaction tuning:
+
+- Before topology cache: `50 x 30`, cap `400`, about `61.2s`, `34/50` solved.
+- Map-based topology cache: about `66.4s`, `33/50` solved.
+- Clone-seeded topology cache: about `92.4s`, `33/50` solved.
+- 20-graph smoke after self-loop fixes: `36.0s`, `14/20` solved.
+
+The first cache version also changed behavior around self-loop neighbors:
+the original `getNeighbors()` preserved self-loop neighbors, while the cache
+initially dropped them. Restoring that behavior still did not recover runtime.
+
+Reverted executable cache usage. Remaining future direction, if this is
+revisited: focus on a narrower cache for large-graph-only paths or a crossing
+matrix/incremental invalidation design where the asymptotic win is large enough
+to pay for cache maintenance.
+
+### June 2026 scalar intersection primitive
+
+Refactored the shared `intersect(a,b)` primitive to avoid allocating temporary
+2D vector arrays on every segment-pair test. The public behavior is intended to
+stay the same: shared-endpoint segments still return true at the primitive
+level, and the same `1e-6` parametric epsilon is used for strict interior
+crossings. Higher-level loops still skip shared-endpoint pairs where appropriate.
+
+Reason: profiling consistently showed crossing work dominating runtime. Unlike
+the reverted topology cache, this is a narrow local refactor in the core hot
+primitive rather than a persistent graph-state abstraction.
+
+### June 2026 benchmark fixed-graph batches
+
+`benchmark-stage2.js` now matches TurboSolver's generation model: it seeds the
+RNG, generates the complete graph batch up front, snapshots graph signatures,
+then solves clones of those graphs. Solver randomness uses a separate derived
+seed (`seed ^ 0x9e3779b9`) so code changes that consume different random
+counts during graph 1 do not change graph 2's initial puzzle.
+
+For strict Node A/B tests, pass `--deterministic-clock`. This replaces
+`Date.now()` during solving with a deterministic counter so structural-search
+time budgets do not vary with machine load or JIT timing. Normal benchmark
+runs still use real wall-clock budgets by default.
+
+Before this, the Node benchmark generated and solved each graph sequentially
+from one global RNG stream. That made code-version A/B comparisons noisy:
+any solver change that consumed a different number of random values could
+change every later generated graph. TurboSolver was already safer here because
+it creates all puzzles before `Run` starts solving.
+
+### June 2026 rollback to first-cut perf baseline
+
+After the fixed-batch benchmark exposed that later comparisons were noisy, we
+rolled back the later solver-policy tuning and kept the first-cut hot-path
+refactors plus benchmark tooling. Specifically, automatic compaction returned
+to the earlier broad search settings (`600ms`, `12` cleanup steps, default
+scale/distance candidates), and the added readiness gates around dominant
+barrier transfer and region extension were removed.
+
+Kept: scalar `intersect()`, shared-endpoint skips in crossing loops, the simple
+incident-edge cache, incremental escape scoring, profiler hooks, and fixed-batch
+benchmark support. This makes the next A/B cycle compare from the last clearly
+defensible performance point instead of from the experimental late-policy mix.
+
 Open: cadence of every-8 is a guess; needs tuning against `adaptiveStatsBuffer`.
 The big list's utility is the empirical question — earlier finding was that
 high-degree-vertex moves are usually unproductive, but the richer probe set

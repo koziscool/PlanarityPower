@@ -18,6 +18,117 @@
 // =============================================================================
 
 (function(exports) {
+
+  var profiler = {
+    enabled: false,
+    stack: [],
+    data: null
+  };
+
+  function profileNow() {
+    if (typeof performance !== 'undefined' && performance.now) {
+      return performance.now();
+    }
+    return Date.now();
+  }
+
+  function emptyProfileData() {
+    return {
+      startedAt: new Date().toISOString(),
+      intersections: {
+        calls: 0,
+        elapsedMs: 0,
+        pairTests: 0,
+        maxEdges: 0
+      },
+      edgeCrossings: {
+        calls: 0,
+        elapsedMs: 0,
+        pairTests: 0,
+        maxEdges: 0
+      },
+      evaluateMoveDelta: {
+        calls: 0,
+        elapsedMs: 0
+      },
+      sections: {}
+    };
+  }
+
+  function resetProfiler() {
+    profiler.data = emptyProfileData();
+  }
+
+  function setProfilerEnabled(enabled) {
+    profiler.enabled = Boolean(enabled);
+    if (profiler.enabled && !profiler.data) resetProfiler();
+  }
+
+  function currentProfileSection() {
+    return profiler.stack.length ?
+      profiler.stack[profiler.stack.length - 1] : 'unattributed';
+  }
+
+  function ensureProfileSection(name) {
+    var sections = profiler.data.sections;
+    if (!sections[name]) {
+      sections[name] = {
+        calls: 0,
+        elapsedMs: 0,
+        intersections: {
+          calls: 0,
+          elapsedMs: 0,
+          pairTests: 0
+        },
+        edgeCrossings: {
+          calls: 0,
+          elapsedMs: 0,
+          pairTests: 0
+        },
+        evaluateMoveDelta: {
+          calls: 0,
+          elapsedMs: 0
+        }
+      };
+    }
+    return sections[name];
+  }
+
+  function profileSection(name, fn) {
+    if (!profiler.enabled) return fn();
+    if (!profiler.data) resetProfiler();
+    profiler.stack.push(name);
+    var started = profileNow();
+    try {
+      return fn();
+    } finally {
+      profiler.stack.pop();
+      var elapsed = profileNow() - started;
+      var section = ensureProfileSection(name);
+      section.calls++;
+      section.elapsedMs += elapsed;
+    }
+  }
+
+  function addProfileCost(kind, elapsedMs, pairTests, edgeCount) {
+    if (!profiler.enabled) return;
+    if (!profiler.data) resetProfiler();
+    var summary = profiler.data[kind];
+    summary.calls++;
+    summary.elapsedMs += elapsedMs;
+    if (pairTests) summary.pairTests += pairTests;
+    if (edgeCount && edgeCount > summary.maxEdges) summary.maxEdges = edgeCount;
+
+    var section = ensureProfileSection(currentProfileSection())[kind];
+    section.calls++;
+    section.elapsedMs += elapsedMs;
+    if (pairTests) section.pairTests += pairTests;
+  }
+
+  function getProfilerReport() {
+    if (!profiler.data) resetProfiler();
+    return JSON.parse(JSON.stringify(profiler.data));
+  }
   
   // ===========================================================================
   // SECTION: CORE GRAPH FUNCTIONS
@@ -34,14 +145,25 @@
   // Uses parametric line intersection with epsilon for numerical stability
   function intersect(a, b) {
     if (a[0] === b[0] && a[1] === b[1] || a[0] === b[1] && a[1] === b[0]) return true;
-    var p = a[0], r = [a[1][0] - p[0], a[1][1] - p[1]];
-    var q = b[0], s = [b[1][0] - q[0], b[1][1] - q[1]];
-    var rxs = cross(r, s);
-    var q_p = [q[0] - p[0], q[1] - p[1]];
-    var t = cross(q_p, s) / rxs;
-    var u = cross(q_p, r) / rxs;
+    var ax = a[0][0], ay = a[0][1];
+    var rx = a[1][0] - ax, ry = a[1][1] - ay;
+    var bx = b[0][0], by = b[0][1];
+    var sx = b[1][0] - bx, sy = b[1][1] - by;
+    var rxs = rx * sy - ry * sx;
+    var qpx = bx - ax, qpy = by - ay;
+    var t = (qpx * sy - qpy * sx) / rxs;
+    var u = (qpx * ry - qpy * rx) / rxs;
     var epsilon = 1e-6;
     return t > epsilon && t < 1 - epsilon && u > epsilon && u < 1 - epsilon;
+  }
+
+  function shareEndpoint(a, b) {
+    return a[0] === b[0] || a[0] === b[1] ||
+      a[1] === b[0] || a[1] === b[1];
+  }
+
+  function nodeIndexOf(graph, node) {
+    return graph.nodes.indexOf(node);
   }
   
   // intersections(links): Count all edge crossings and mark involved elements
@@ -49,6 +171,9 @@
   // Returns: Total crossing count (the number we're trying to get to zero)
   // Complexity: O(E²) where E = number of edges
   function intersections(links) {
+    var profileActive = profiler.enabled;
+    var profileStarted = profileActive ? profileNow() : 0;
+    var pairTests = 0;
     var n = links.length, count = 0;
     for (var i = 0; i < n; i++) {
       links[i].intersection = false;
@@ -57,12 +182,18 @@
     }
     for (var i = 0; i < n; i++) {
       for (var j = i + 1; j < n; j++) {
+        if (shareEndpoint(links[i], links[j])) continue;
+        if (profileActive) pairTests++;
         if (intersect(links[i], links[j])) {
           links[i].intersection = links[i][0].intersection = links[i][1].intersection = true;
           links[j].intersection = links[j][0].intersection = links[j][1].intersection = true;
           count++;
         }
       }
+    }
+    if (profileActive) {
+      addProfileCost('intersections', profileNow() - profileStarted,
+        pairTests, n);
     }
     return count;
   }
@@ -224,19 +355,34 @@
   
   // getNodeEdges(graph, node): Return edges connected to this node
   function getNodeEdges(graph, node) {
-    var edges = [];
-    for (var i = 0; i < graph.links.length; i++) {
-      var link = graph.links[i];
-      if (link[0] === node || link[1] === node) {
-        edges.push(link);
-      }
+    if (graph._nodeEdgeCache &&
+        graph._nodeEdgeCache.nodeCount === graph.nodes.length &&
+        graph._nodeEdgeCache.linkCount === graph.links.length) {
+      return graph._nodeEdgeCache.edges[graph.nodes.indexOf(node)] || [];
     }
 
-    return edges;
+    var cachedEdges = graph.nodes.map(function() { return []; });
+    for (var i = 0; i < graph.links.length; i++) {
+      var link = graph.links[i];
+      var a = graph.nodes.indexOf(link[0]);
+      var b = graph.nodes.indexOf(link[1]);
+      if (a >= 0) cachedEdges[a].push(link);
+      if (b >= 0 && b !== a) cachedEdges[b].push(link);
+    }
+
+    graph._nodeEdgeCache = {
+      nodeCount: graph.nodes.length,
+      linkCount: graph.links.length,
+      edges: cachedEdges
+    };
+    return cachedEdges[graph.nodes.indexOf(node)] || [];
   }
   
   // Count crossings involving a set of edges (against all other edges)
   function countEdgeCrossings(graph, edges) {
+    var profileActive = profiler.enabled;
+    var profileStarted = profileActive ? profileNow() : 0;
+    var pairTests = 0;
     var crossingCount = 0;
     var edgeSet = new Set(edges);
     
@@ -245,6 +391,8 @@
       for (var j = 0; j < graph.links.length; j++) {
         var other = graph.links[j];
         if (edgeSet.has(other)) continue; // Don't double-count edges in our set
+        if (shareEndpoint(edge, other)) continue;
+        if (profileActive) pairTests++;
         if (intersect(edge, other)) {
           crossingCount++;
         }
@@ -254,20 +402,33 @@
     // Also count crossings between edges in the set
     for (var i = 0; i < edges.length; i++) {
       for (var j = i + 1; j < edges.length; j++) {
+        if (shareEndpoint(edges[i], edges[j])) continue;
+        if (profileActive) pairTests++;
         if (intersect(edges[i], edges[j])) {
           crossingCount++;
         }
       }
     }
     
+    if (profileActive) {
+      addProfileCost('edgeCrossings', profileNow() - profileStarted,
+        pairTests, graph.links.length);
+    }
     return crossingCount;
   }
   
   // Evaluate a node move incrementally - returns crossing delta (negative = improvement)
   // Much faster than full intersections() call: O(degree × E) vs O(E²)
   function evaluateMoveDelta(graph, node, newX, newY, baseCount) {
+    var profileActive = profiler.enabled;
+    var profileStarted = profileActive ? profileNow() : 0;
     var edges = getNodeEdges(graph, node);
-    if (edges.length === 0) return 0;
+    if (edges.length === 0) {
+      if (profileActive) {
+        addProfileCost('evaluateMoveDelta', profileNow() - profileStarted);
+      }
+      return 0;
+    }
     
     // Count crossings before move
     var crossingsBefore = countEdgeCrossings(graph, edges);
@@ -284,6 +445,9 @@
     node[0] = oldX;
     node[1] = oldY;
     
+    if (profileActive) {
+      addProfileCost('evaluateMoveDelta', profileNow() - profileStarted);
+    }
     return crossingsAfter - crossingsBefore; // negative = improvement
   }
   
@@ -306,7 +470,7 @@
     var candidates = graph.nodes.filter(function(n) { return n.intersection; });
     
     candidates.forEach(function(node) {
-      var i = graph.nodes.indexOf(node);
+      var i = nodeIndexOf(graph, node);
       var origX = node[0], origY = node[1];
       
       // Sample random positions
@@ -1044,6 +1208,7 @@
     };
     for (var a = 0; a < graph.links.length; a++) {
       for (var b = a + 1; b < graph.links.length; b++) {
+        if (shareEndpoint(graph.links[a], graph.links[b])) continue;
         if (!intersect(graph.links[a], graph.links[b])) continue;
         var a0 = graph.nodes.indexOf(graph.links[a][0]);
         var a1 = graph.nodes.indexOf(graph.links[a][1]);
@@ -1196,6 +1361,7 @@
     vertices.forEach(function(index) { set[index] = true; });
     for (var a = 0; a < graph.links.length; a++) {
       for (var b = a + 1; b < graph.links.length; b++) {
+        if (shareEndpoint(graph.links[a], graph.links[b])) continue;
         if (!intersect(graph.links[a], graph.links[b])) continue;
         var ends = [
           graph.nodes.indexOf(graph.links[a][0]),
@@ -2585,7 +2751,7 @@
         if (!intersect(graph.links[i], graph.links[j])) continue;
         [graph.links[i][0], graph.links[i][1], graph.links[j][0], graph.links[j][1]]
           .forEach(function(node) {
-            candidateSet[graph.nodes.indexOf(node)] = true;
+            candidateSet[nodeIndexOf(graph, node)] = true;
           });
       }
     }
@@ -3252,7 +3418,7 @@
 
         var incidentNeighbor = conflict.incident[0] === node
           ? conflict.incident[1] : conflict.incident[0];
-        var incidentNeighborIndex = graph.nodes.indexOf(incidentNeighbor);
+        var incidentNeighborIndex = nodeIndexOf(graph, incidentNeighbor);
         if (incidentNeighborIndex >= 0 && incidentNeighborIndex !== vertexIndex) {
           addCandidate('restart-crossing-edge-pair',
             [vertexIndex, incidentNeighborIndex], [
@@ -3423,7 +3589,7 @@
       // Try moving each vertex to the other side of this edge
       for (var vi = 0; vi < verticesToMove.length; vi++) {
         var node = verticesToMove[vi];
-        var nodeIdx = graph.nodes.indexOf(node);
+        var nodeIdx = nodeIndexOf(graph, node);
         var origX = node[0], origY = node[1];
         
         var side = sideOfEdge(edge, node);
@@ -3492,7 +3658,7 @@
     // For each candidate vertex, try moving it to resolve crossings
     for (var ci = 0; ci < candidates.length; ci++) {
       var node = candidates[ci];
-      var nodeIdx = graph.nodes.indexOf(node);
+      var nodeIdx = nodeIndexOf(graph, node);
       var origX = node[0], origY = node[1];
       
       // Find edges this vertex is part of that have crossings
@@ -3599,7 +3765,7 @@
     var bestImprovement = 0;
     
     candidates.forEach(function(node) {
-      var i = graph.nodes.indexOf(node);
+      var i = nodeIndexOf(graph, node);
       var origX = node[0], origY = node[1];
       
       // 15x15 grid search
@@ -3694,7 +3860,7 @@
       // Try to compact each member toward this local centroid
       for (var i = 0; i < clump.length; i++) {
         var node = clump[i];
-        var nodeIdx = graph.nodes.indexOf(node);
+        var nodeIdx = nodeIndexOf(graph, node);
         var origX = node[0], origY = node[1];
         
         // Distance from clump centroid
@@ -3799,7 +3965,7 @@
     for (var c = 0; c < Math.min(candidates.length, 5); c++) {
       var cand = candidates[c];
       var node = cand.node;
-      var nodeIdx = graph.nodes.indexOf(node);
+      var nodeIdx = nodeIndexOf(graph, node);
       var origX = node[0], origY = node[1];
       var ideal = cand.ideal;
       
@@ -4050,7 +4216,7 @@
           (moveLength * edgeLength));
         blockers[b] = {
           edgeIndex: b,
-          vertices: [graph.nodes.indexOf(edge[0]), graph.nodes.indexOf(edge[1])],
+          vertices: [nodeIndexOf(graph, edge[0]), nodeIndexOf(graph, edge[1])],
           alignment: alignment,
           orthogonal: alignment < 0.5
         };
@@ -4543,7 +4709,7 @@
     // Pick top sore thumb (with some randomness to avoid loops)
     var pickIdx = Math.floor(Math.random() * Math.min(3, scored.length));
     var node = scored[pickIdx].node;
-    var i = graph.nodes.indexOf(node);
+    var i = nodeIndexOf(graph, node);
     var origX = node[0], origY = node[1];
     
     // Try boundary positions first (edges often help), then random
@@ -4565,10 +4731,7 @@
       if (boundaryDx * boundaryDx + boundaryDy * boundaryDy < 1e-10) continue;
       if (isTooClose(graph, node, pos[0], pos[1])) continue;
       
-      node[0] = pos[0];
-      node[1] = pos[1];
-      var newCount = intersections(graph.links);
-      var improvement = count - newCount;
+      var improvement = -evaluateMoveDelta(graph, node, pos[0], pos[1], count);
       
       if (improvement > bestImprovement) {
         bestImprovement = improvement;
@@ -4591,10 +4754,7 @@
     var centroidDy = wc ? wc[1] - origY : 0;
     if (wc && centroidDx * centroidDx + centroidDy * centroidDy >= 1e-10 &&
         !isTooClose(graph, node, wc[0], wc[1])) {
-      node[0] = wc[0];
-      node[1] = wc[1];
-      var newCount = intersections(graph.links);
-      var improvement = count - newCount;
+      var improvement = -evaluateMoveDelta(graph, node, wc[0], wc[1], count);
       if (improvement > bestImprovement) {
         bestImprovement = improvement;
         bestMove = {
@@ -4610,10 +4770,6 @@
       }
     }
     
-    node[0] = origX;
-    node[1] = origY;
-    intersections(graph.links);
-    
     // Only accept escape moves that don't make things catastrophically worse
     // Allowing small degradation (-5) for escape, but not huge jumps
     if (bestMove && bestMove.improvement >= -5) return bestMove;
@@ -4625,15 +4781,7 @@
       
       if (isTooClose(graph, node, newX, newY)) continue;
       
-      node[0] = newX;
-      node[1] = newY;
-      var newCount = intersections(graph.links);
-      var improvement = count - newCount;
-      
-      // Restore before deciding
-      node[0] = origX;
-      node[1] = origY;
-      intersections(graph.links);  // restore intersection state too
+      var improvement = -evaluateMoveDelta(graph, node, newX, newY, count);
       
       // Only accept if not catastrophic
       if (improvement >= -5) {
@@ -5212,10 +5360,12 @@
         compactionStalled &&
         state.compactionAttemptedAtBestCrossings !== state.bestCrossingCount) {
       state.compactionAttemptedAtBestCrossings = state.bestCrossingCount;
-      var compactionReport = suggestRegionCompactionPlan(graph, {
-        timeBudgetMs: 600,
-        cleanupSteps: 12,
-        minRegionSize: 5
+      var compactionReport = profileSection('region-compaction-search', function() {
+        return suggestRegionCompactionPlan(graph, {
+          timeBudgetMs: 600,
+          cleanupSteps: 12,
+          minRegionSize: 5
+        });
       });
       state.lastCompactionSearch = compactionReport;
       if (compactionReport && compactionReport.best) {
@@ -5271,7 +5421,9 @@
       }
     }
 
-    best = findAdaptiveMinimizeMove(graph, state);
+    best = profileSection('adaptive-minimize', function() {
+      return findAdaptiveMinimizeMove(graph, state);
+    });
     
     // If we found a valid move, apply it
     if (best) {
@@ -5296,10 +5448,12 @@
     if (!state.activeStructuralPlan && count <= 15 &&
         state.containedTriangleAttemptedAtCount !== count) {
       state.containedTriangleAttemptedAtCount = count;
-      var containedReport = suggestContainedTriangleSolve(graph, {
-        timeBudgetMs: 140,
-        componentLimit: 10,
-        restartLimit: 40
+      var containedReport = profileSection('contained-triangle-search', function() {
+        return suggestContainedTriangleSolve(graph, {
+          timeBudgetMs: 140,
+          componentLimit: 10,
+          restartLimit: 40
+        });
       });
       state.lastContainedTriangleSearch = containedReport;
       if (containedReport.best) {
@@ -5344,10 +5498,12 @@
     if (!state.activeStructuralPlan && count <= 15 &&
         state.barrierTransferAttemptedAtCount !== count) {
       state.barrierTransferAttemptedAtCount = count;
-      var barrierReport = suggestDominantBarrierTransfer(graph, {
-        timeBudgetMs: 250,
-        cleanupSteps: 30,
-        maxGroupSize: 16
+      var barrierReport = profileSection('dominant-barrier-search', function() {
+        return suggestDominantBarrierTransfer(graph, {
+          timeBudgetMs: 250,
+          cleanupSteps: 30,
+          maxGroupSize: 16
+        });
       });
       state.lastBarrierTransferSearch = barrierReport;
       if (barrierReport.best) {
@@ -5393,7 +5549,9 @@
 
     // Before escaping, try anchored centroid move
     // This uses weighted centroid that prioritizes fixed/yellow neighbors
-    best = findAnchoredCentroidMove(graph);
+    best = profileSection('anchored-centroid', function() {
+      return findAnchoredCentroidMove(graph);
+    });
     if (best && best.improvement >= 0) {
       if (wouldOscillate(state, best.nodeIndex, best.toX, best.toY)) {
         best = null;
@@ -5418,7 +5576,9 @@
 
     // Stage 1b: after ordinary geometric descent is genuinely exhausted, try
     // a few strictly reducing topological side flips, then return to Stage 1.
-    best = findReducingSideFlipMove(graph, state);
+    best = profileSection('reducing-side-flip', function() {
+      return findReducingSideFlipMove(graph, state);
+    });
     if (best) {
       best.node[0] = best.toX;
       best.node[1] = best.toY;
@@ -5443,11 +5603,15 @@
     var finisher = null;
     if (state.finisherAttemptedAtCount !== count) {
       state.finisherAttemptedAtCount = count;
-      finisher = findSeparatingTriangleFinisher(graph);
+      finisher = profileSection('separating-triangle-finisher', function() {
+        return findSeparatingTriangleFinisher(graph);
+      });
       if (!finisher && count <= 5 && (state.finisherLookaheadAttempts || 0) < 2) {
         state.finisherLookaheadAttempts = (state.finisherLookaheadAttempts || 0) + 1;
-        finisher = findSeparatingTriangleFinisherLookahead(graph, {
-          crossingLimit: 5
+        finisher = profileSection('separating-triangle-lookahead', function() {
+          return findSeparatingTriangleFinisherLookahead(graph, {
+            crossingLimit: 5
+          });
         });
       }
     }
@@ -5473,9 +5637,11 @@
     // restarts remain suggestion-only in Interactive.
     if (count <= 15 && state.stage2SolveAttemptedAtCount !== count) {
       state.stage2SolveAttemptedAtCount = count;
-      var provenRestart = suggestStage2Restart(graph, {
-        timeBudgetMs: 90,
-        requiredImprovement: count
+      var provenRestart = profileSection('proven-stage2-restart', function() {
+        return suggestStage2Restart(graph, {
+          timeBudgetMs: 90,
+          requiredImprovement: count
+        });
       });
       if (provenRestart.best && provenRestart.best.finalCrossings === 0) {
         beginStructuralPlan(state, {
@@ -5508,9 +5674,11 @@
     if (!state.activeStructuralPlan && graph.nodes.length <= 60 && count <= 80 &&
         state.regionExtensionAttemptedAtCount !== count) {
       state.regionExtensionAttemptedAtCount = count;
-      var extensionReport = suggestRegionExtensionPlan(graph, {
-        timeBudgetMs: 200,
-        cleanupSteps: 16
+      var extensionReport = profileSection('region-extension-search', function() {
+        return suggestRegionExtensionPlan(graph, {
+          timeBudgetMs: 200,
+          cleanupSteps: 16
+        });
       });
       state.lastRegionExtensionSearch = extensionReport;
       if (extensionReport.best) {
@@ -5563,7 +5731,9 @@
     }
 
     // Try escape move
-    var escape = findEscapeMove(graph);
+    var escape = profileSection('escape', function() {
+      return findEscapeMove(graph);
+    });
     if (escape) {
       if (wouldOscillate(state, escape.nodeIndex, escape.toX, escape.toY)) {
         state.oscillatingVertices = state.oscillatingVertices || {};
@@ -5718,7 +5888,7 @@
       
       // For each border vertex, try to find a position that makes it conflict-free
       border.forEach(function(node) {
-        var i = graph.nodes.indexOf(node);
+        var i = nodeIndexOf(graph, node);
         var origX = node[0], origY = node[1];
         
         // If clump exists, try positions near the clump
@@ -6079,7 +6249,7 @@
     if (candidates.length === 0) return null;
     
     var node = candidates[Math.floor(Math.random() * candidates.length)];
-    var i = graph.nodes.indexOf(node);
+    var i = nodeIndexOf(graph, node);
     
     var originalX = node[0];
     var originalY = node[1];
@@ -6170,5 +6340,8 @@
   exports.weightedCentroid = weightedCentroid;
   exports.anchorScore = anchorScore;
   exports.findBarrierMove = findBarrierMove;
+  exports.setProfilerEnabled = setProfilerEnabled;
+  exports.resetProfiler = resetProfiler;
+  exports.getProfilerReport = getProfilerReport;
   
 })(typeof module !== 'undefined' && module.exports ? module.exports : (window.Solver = {}));

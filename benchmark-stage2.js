@@ -1,5 +1,5 @@
 // Focused Stage 2 benchmark with deterministic graph generation.
-// Usage: node benchmark-stage2.js [puzzles=100] [nodes=30] [maxMoves=600] [seed=12345]
+// Usage: node benchmark-stage2.js [puzzles=100] [nodes=30] [maxMoves=600] [seed=12345] [--profile] [--deterministic-clock]
 
 const fs = require('fs');
 const solver = require('./solver.js');
@@ -18,8 +18,37 @@ function percentile(values, fraction) {
   return sorted[Math.floor((sorted.length - 1) * fraction)];
 }
 
-function runPuzzle(index, nodeCount, maxMoves) {
-  const graph = solver.scramble(solver.planarGraph(nodeCount));
+function cloneGraph(graph) {
+  const nodes = graph.nodes.map(node => [node[0], node[1]]);
+  const links = graph.links.map(link => [
+    nodes[graph.nodes.indexOf(link[0])],
+    nodes[graph.nodes.indexOf(link[1])]
+  ]);
+  return { nodes, links };
+}
+
+function graphSignature(graph) {
+  const edges = graph.links.map(link => {
+    const a = graph.nodes.indexOf(link[0]);
+    const b = graph.nodes.indexOf(link[1]);
+    return a < b ? `${a}-${b}` : `${b}-${a}`;
+  }).sort();
+  const positions = graph.nodes.map(node =>
+    `${node[0].toFixed(6)},${node[1].toFixed(6)}`);
+  return `${positions.join('|')}::${edges.join('|')}`;
+}
+
+function generateBatch(puzzleCount, nodeCount, seed) {
+  Math.random = seededRandom(seed);
+  const graphs = [];
+  for (let i = 0; i < puzzleCount; i++) {
+    graphs.push(solver.scramble(solver.planarGraph(nodeCount)));
+  }
+  return graphs;
+}
+
+function runPuzzle(index, sourceGraph, maxMoves) {
+  const graph = cloneGraph(sourceGraph);
   const initialCrossings = solver.intersections(graph.links);
   const state = {};
   const strategies = {};
@@ -173,18 +202,86 @@ function summarize(results, config, elapsedMs) {
   };
 }
 
+function ms(value) {
+  return Math.round(value * 10) / 10;
+}
+
+function formatProfile(profile) {
+  const total = profile.intersections.elapsedMs +
+    profile.edgeCrossings.elapsedMs;
+  const sections = Object.entries(profile.sections)
+    .map(([name, section]) => ({
+      name,
+      calls: section.calls,
+      elapsedMs: section.elapsedMs,
+      intersectionsMs: section.intersections.elapsedMs,
+      edgeCrossingsMs: section.edgeCrossings.elapsedMs,
+      deltaMs: section.evaluateMoveDelta.elapsedMs,
+      pairTests: section.intersections.pairTests +
+        section.edgeCrossings.pairTests
+    }))
+    .sort((a, b) => b.elapsedMs - a.elapsedMs)
+    .slice(0, 12);
+
+  return {
+    crossingWorkMs: ms(total),
+    intersections: {
+      calls: profile.intersections.calls,
+      elapsedMs: ms(profile.intersections.elapsedMs),
+      pairTests: profile.intersections.pairTests,
+      maxEdges: profile.intersections.maxEdges
+    },
+    incrementalEdgeCrossings: {
+      calls: profile.edgeCrossings.calls,
+      elapsedMs: ms(profile.edgeCrossings.elapsedMs),
+      pairTests: profile.edgeCrossings.pairTests,
+      maxEdges: profile.edgeCrossings.maxEdges
+    },
+    evaluateMoveDelta: {
+      calls: profile.evaluateMoveDelta.calls,
+      elapsedMs: ms(profile.evaluateMoveDelta.elapsedMs)
+    },
+    hottestSections: sections.map(section => ({
+      name: section.name,
+      calls: section.calls,
+      elapsedMs: ms(section.elapsedMs),
+      intersectionsMs: ms(section.intersectionsMs),
+      edgeCrossingsMs: ms(section.edgeCrossingsMs),
+      deltaMs: ms(section.deltaMs),
+      pairTests: section.pairTests
+    }))
+  };
+}
+
 const config = {
   puzzles: Number(process.argv[2]) || 100,
   nodes: Number(process.argv[3]) || 30,
   maxMoves: Number(process.argv[4]) || 600,
-  seed: Number(process.argv[5]) || 12345
+  seed: Number(process.argv[5]) || 12345,
+  profile: process.argv.includes('--profile'),
+  deterministicClock: process.argv.includes('--deterministic-clock')
 };
 
-Math.random = seededRandom(config.seed);
-const startedAt = Date.now();
+if (config.profile) {
+  solver.resetProfiler();
+  solver.setProfilerEnabled(true);
+}
+
+const graphBatch = generateBatch(config.puzzles, config.nodes, config.seed);
+const graphSignatures = graphBatch.map(graphSignature);
+Math.random = seededRandom(config.seed ^ 0x9e3779b9);
+const realDateNow = Date.now.bind(Date);
+const originalDateNow = Date.now;
+if (config.deterministicClock) {
+  let fakeNow = 0;
+  Date.now = function() {
+    return fakeNow++;
+  };
+}
+const startedAt = realDateNow();
 const results = [];
 for (let i = 0; i < config.puzzles; i++) {
-  const result = runPuzzle(i, config.nodes, config.maxMoves);
+  const result = runPuzzle(i, graphBatch[i], config.maxMoves);
   results.push(result);
   console.log(
     `${result.puzzle}/${config.puzzles} ` +
@@ -194,7 +291,19 @@ for (let i = 0; i < config.puzzles; i++) {
   );
 }
 
-const report = summarize(results, config, Date.now() - startedAt);
+if (config.deterministicClock) {
+  Date.now = originalDateNow;
+}
+const report = summarize(results, config, realDateNow() - startedAt);
+report.graphSignatures = graphSignatures;
+if (config.profile) {
+  const profile = solver.getProfilerReport();
+  report.profile = profile;
+  report.profileSummary = formatProfile(profile);
+}
 fs.writeFileSync('benchmark-stage2-results.json', JSON.stringify(report, null, 2));
 console.log(JSON.stringify(report.summary, null, 2));
+if (config.profile) {
+  console.log(JSON.stringify(report.profileSummary, null, 2));
+}
 console.log('Wrote benchmark-stage2-results.json');

@@ -2625,6 +2625,113 @@
     };
   }
 
+  // ===========================================================================
+  // SECTION: STORY / CASCADE-STATE METRICS (real-time, causal, stateful)
+  // A live readout of where a solve sits relative to the wasted-tail/cascade
+  // story (see METRICS.md). All numbers use only the present move plus a short
+  // trailing window, so the solver itself can read them mid-solve. Cheap: pure
+  // O(N) arithmetic over per-vertex crossing counts the solver already pays for.
+  //
+  // Vocabulary (per-move, window W):
+  //   freeze  - mean offender-set Jaccard over last W moves; ~1 => the SAME
+  //             vertices cross every move (thrashing in place). [stuck signal]
+  //   dwell   - moves since crossings last set a STRICT new low; the live length
+  //             of the current wasted tail. Resets when a cascade makes new lows.
+  //   crowd   - # vertices that have been dirty >= W consecutive moves.
+  //   trend   - crossings now minus crossings W moves ago (sign: + uphill/escape,
+  //             ~0 plateau, - descending/cascade).
+  //   thaw    - # offenders that dropped out of the set since last move (turnover).
+  //   drop    - max single-vertex crossing-count reduction this move (a
+  //             de-confliction EVENT; not a prediction that a cascade will catch).
+  // ===========================================================================
+  function createStoryState(window) {
+    return {
+      W: window || 15,
+      streak: null,        // per-vertex consecutive-dirty counter
+      prevCounts: null,    // per-vertex crossing counts last move (for drop)
+      prevOffSet: null,    // map {vertexIndex: true} of last move's offenders
+      jaccardRing: [],     // recent consecutive Jaccards (for freeze)
+      crossRing: [],       // recent total crossings (for trend)
+      best: Infinity,      // best (min) total crossings seen so far (for dwell)
+      move: 0,
+      lastImprove: 0
+    };
+  }
+
+  // Updates st in place and returns the current story-metric vector. Computes
+  // its own per-vertex counts via the canonical detector so it can be called
+  // with just the graph; callers that already have counts may pass them in.
+  function updateStoryMetrics(graph, st, crossingCountsOpt, totalCrossingsOpt) {
+    var crossingCounts = crossingCountsOpt || getCrossingCounts(graph);
+    var N = crossingCounts.length;
+    var W = st.W;
+    if (!st.streak || st.streak.length !== N) st.streak = new Array(N).fill(0);
+    st.move++;
+
+    var total = (typeof totalCrossingsOpt === 'number') ?
+      totalCrossingsOpt : intersections(graph.links);
+
+    // offender set, streaks, crowd, worst offender
+    var offSet = {};
+    var offenderCount = 0, crowd = 0, topCc = 0, topVertex = -1;
+    for (var v = 0; v < N; v++) {
+      var c = crossingCounts[v] || 0;
+      if (c > 0) {
+        offSet[v] = true; offenderCount++;
+        st.streak[v]++;
+        if (st.streak[v] >= W) crowd++;
+        if (c > topCc) { topCc = c; topVertex = v; }
+      } else st.streak[v] = 0;
+    }
+
+    // freeze: averaged consecutive offender-set Jaccard over last W moves
+    var jacc = 1, thaw = 0;
+    if (st.prevOffSet) {
+      var inter = 0, unionCount = offenderCount;
+      for (var k in offSet) { if (st.prevOffSet[k]) inter++; }
+      for (var p in st.prevOffSet) { if (!offSet[p]) { unionCount++; thaw++; } }
+      jacc = unionCount > 0 ? inter / unionCount : 1;
+    }
+    st.jaccardRing.push(jacc);
+    if (st.jaccardRing.length > W) st.jaccardRing.shift();
+    var freeze = st.jaccardRing.reduce(function(a, b) { return a + b; }, 0) /
+      st.jaccardRing.length;
+
+    // drop: largest single-vertex crossing reduction this move
+    var drop = 0;
+    if (st.prevCounts) {
+      for (var d = 0; d < N; d++) {
+        var dd = (st.prevCounts[d] || 0) - (crossingCounts[d] || 0);
+        if (dd > drop) drop = dd;
+      }
+    }
+
+    // dwell: moves since a strict new crossings-low (live wasted-tail length)
+    if (total < st.best) { st.best = total; st.lastImprove = st.move; }
+    var dwell = st.move - st.lastImprove;
+
+    // trend: crossings now vs W moves ago
+    st.crossRing.push(total);
+    if (st.crossRing.length > W + 1) st.crossRing.shift();
+    var trend = total - st.crossRing[0];
+
+    st.prevOffSet = offSet;
+    st.prevCounts = crossingCounts.slice();
+
+    return {
+      crossings: total,
+      offenderCount: offenderCount,
+      crowd: crowd,
+      topOffender: topVertex,
+      topOffenderCc: topCc,
+      freeze: freeze,
+      dwell: dwell,
+      trend: trend,
+      thaw: thaw,
+      drop: drop
+    };
+  }
+
   function cloneGraph(graph) {
     var nodes = graph.nodes.map(function(node) { return [node[0], node[1]]; });
     var links = graph.links.map(function(link) {
@@ -7423,6 +7530,8 @@
   exports.findClumps = findClumps;
   exports.analyzeGraphState = analyzeGraphState;
   exports.computeProgressMetrics = computeProgressMetrics;
+  exports.createStoryState = createStoryState;
+  exports.updateStoryMetrics = updateStoryMetrics;
   exports.analyzeEstablishedRegion = analyzeEstablishedRegion;
   exports.analyzeConflictRegions = analyzeConflictRegions;
   exports.suggestDirectionalPlans = suggestDirectionalPlans;

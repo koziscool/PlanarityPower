@@ -4,6 +4,27 @@ This documents strategies and approaches that have been tried but are currently 
 
 > **Maintenance**: Update this file when making algorithmic changes. When disabling a strategy, document why. When trying something new, add it here even if it fails. This lets future sessions quickly recapitulate what's been explored.
 
+## Analytics / Metrics Layer
+
+A derivative-measurement layer was added on top of the solver's objective state to
+quantify *why* graphs get stuck (the wasted-tail → cascade story). It does not
+change move selection yet, but is computed live and stored on `solverState` so the
+algo can read it. See **METRICS.md** for full definitions. Key additions in
+`solver.js`:
+
+| function | role |
+|----------|------|
+| `computeProgressMetrics` | per-frame progress snapshot (clean ratios, largest clean region, near-clean, crossing density, top-concentration). |
+| `createStoryState` / `updateStoryMetrics` | real-time causal story metrics: **freeze** (offender-set Jaccard), **dwell** (live wasted-tail length), **crowd**, **trend**, **thaw**, **drop**. |
+| `analyzeGraphState` | now also returns `crossingCounts` so the above need no extra crossing pass. |
+
+`annotate-history.js` was refactored to reuse these (offline) and add a
+retrospective `findCascadeOnset`. Both card UIs display the story metrics.
+Validated finding (n=150, 30v): cascades fire from a *messy* peak reached by going
+uphill, are triggered by one offender de-conflicting itself, propagate as a
+~9-vertex chain, and the frozen offender set thaws; stuck graphs mostly never
+*start* a cascade. Inside/outside is not the trigger mechanism.
+
 ## Removed Strategies
 
 These implementations were removed from `solver.js` during consolidation because

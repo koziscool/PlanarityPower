@@ -273,6 +273,32 @@
     var minimizeStepCore = Solver.minimizeStep;
     var analyzeGraphState = Solver.analyzeGraphState;
     var computeProgressMetrics = Solver.computeProgressMetrics;
+    var createStoryState = Solver.createStoryState;
+    var updateStoryMetrics = Solver.updateStoryMetrics;
+
+    // Live story/cascade-state metrics for the current puzzle, computed by
+    // replaying the move history through a fresh story-state. Cached on history
+    // length so re-renders don't recompute. Robust to the many move sites.
+    function refreshStoryMetrics(puzzle) {
+      if (!updateStoryMetrics || !puzzle.history || !puzzle.history.length) return;
+      if (puzzle._storyHistLen === puzzle.history.length) return; // unchanged
+      var nodes0 = puzzle.graph.nodes;
+      var edgePairs = puzzle.graph.links.map(function(l) {
+        return [nodes0.indexOf(l[0]), nodes0.indexOf(l[1])];
+      });
+      var st = createStoryState();
+      var sm = null;
+      for (var hi = 0; hi < puzzle.history.length; hi++) {
+        var pos = puzzle.history[hi].positions;
+        if (!pos) continue;
+        var nodes = pos.map(function(p) { return [p[0], p[1]]; });
+        var links = edgePairs.map(function(e) { return [nodes[e[0]], nodes[e[1]]]; });
+        sm = updateStoryMetrics({ nodes: nodes, links: links }, st,
+          null, puzzle.history[hi].crossings);
+      }
+      puzzle.storyMetrics = sm;
+      puzzle._storyHistLen = puzzle.history.length;
+    }
     var suggestStage2Restart = Solver.suggestStage2Restart;
     var suggestSeparatorReshape = Solver.suggestSeparatorReshape;
     var suggestAnchorBreakBarrierTransfer = Solver.suggestAnchorBreakBarrierTransfer;
@@ -1441,7 +1467,8 @@
         : 'none';
       var progressMetrics = computeProgressMetrics(puzzle.graph, analysis);
       puzzle.progressMetrics = progressMetrics;
-      updateBetaMetrics(analysis, progressMetrics);
+      refreshStoryMetrics(puzzle);
+      updateBetaMetrics(analysis, progressMetrics, puzzle.storyMetrics);
 
       document.getElementById('diagnosis').innerHTML =
         '<div>Crossings: ' + analysis.crossings + '</div>' +
@@ -1472,7 +1499,7 @@
       return analysis;
     }
 
-    function updateBetaMetrics(analysis, progress) {
+    function updateBetaMetrics(analysis, progress, story) {
       var box = document.getElementById('beta-metrics');
       if (!box || !analysis || !analysis.edgeLengthByDegree) return;
       var edgeLength = analysis.edgeLengthByDegree;
@@ -1516,6 +1543,24 @@
             '<span class="metric-value">' +
             Math.round(progress.topCrossingShare * 100) + '%</span></div>';
       }
+      var storyBlock = '';
+      if (story) {
+        var trendStr = (story.trend > 0 ? '+' : '') + story.trend;
+        storyBlock =
+          '<div class="metrics-title" style="margin-top:8px;">Cascade state (live)</div>' +
+          '<div class="metric-row"><span class="metric-label">Freeze (offender Jaccard)</span>' +
+            '<span class="metric-value">' + story.freeze.toFixed(2) + '</span></div>' +
+          '<div class="metric-row"><span class="metric-label">Dwell (wasted tail)</span>' +
+            '<span class="metric-value">' + story.dwell + '</span></div>' +
+          '<div class="metric-row"><span class="metric-label">Crowd (persistent offenders)</span>' +
+            '<span class="metric-value">' + story.crowd + '</span></div>' +
+          '<div class="metric-row"><span class="metric-label">Trend (crossings vs W ago)</span>' +
+            '<span class="metric-value">' + trendStr + '</span></div>' +
+          '<div class="metric-row"><span class="metric-label">Thaw (offenders cleared)</span>' +
+            '<span class="metric-value">' + story.thaw + '</span></div>' +
+          '<div class="metric-row"><span class="metric-label">Drop (max self-deconflict)</span>' +
+            '<span class="metric-value">' + story.drop + '</span></div>';
+      }
       box.innerHTML =
         '<div class="metrics-title">Development Measurements</div>' +
         '<div class="metric-row"><span class="metric-label">Crossings</span>' +
@@ -1540,6 +1585,7 @@
           edgeLength.vertexAverageIncidentLogLength.toFixed(2) +
           '</span></div>' +
         progressBlock +
+        storyBlock +
         '<div class="metrics-title" style="margin-top:8px;">By Degree</div>' +
         buckets;
     }

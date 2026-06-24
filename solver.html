@@ -140,6 +140,8 @@
     var solverStepCore = Solver.solverStep;
     var analyzeGraphState = Solver.analyzeGraphState;
     var computeProgressMetrics = Solver.computeProgressMetrics;
+    var createStoryState = Solver.createStoryState;
+    var updateStoryMetrics = Solver.updateStoryMetrics;
     
     var puzzles = [];
     var running = false;
@@ -367,10 +369,26 @@
           '<span class="sep">·</span>' +
           '<span class="v" style="color:#7f7">solved</span>';
       }
+      // Story / cascade-state row (live, causal). Computed per-move in
+      // solverStep; here we only display puzzle.storyMetrics.
+      var storyLine = '';
+      var sm = puzzle.storyMetrics;
+      if (sm && puzzle.status !== 'solved') {
+        var sep2 = '<span class="sep">·</span>';
+        var trendStr = (sm.trend > 0 ? '+' : '') + sm.trend;
+        storyLine =
+          metricItem('freeze', sm.freeze.toFixed(2)) + sep2 +
+          metricItem('dwell', sm.dwell) + sep2 +
+          metricItem('crowd', sm.crowd) + sep2 +
+          metricItem('trend', trendStr) + sep2 +
+          metricItem('thaw', sm.thaw) + sep2 +
+          metricItem('drop', sm.drop);
+      }
       puzzle.header.innerHTML =
         '<div class="row"><span>' + statusInfo + '</span>' +
         '<span>' + (puzzle.lastStrategy || '-') + '</span></div>' +
-        '<div class="row metrics-row"><span>' + metricsLine + '</span></div>';
+        '<div class="row metrics-row"><span>' + metricsLine + '</span></div>' +
+        (storyLine ? '<div class="row metrics-row"><span>' + storyLine + '</span></div>' : '');
       puzzle.header.title = 'Click puzzle to see history in console';
     }
     
@@ -451,7 +469,15 @@
         };
         puzzle.history.push(moveEntry);
         puzzle.snapshots.push(snapshotPuzzle(puzzle, 'move', result));
-        
+
+        // Live story/cascade-state metrics, kept on solverState so the algo can
+        // read them next step. Updated once per actual move (not per render).
+        if (updateStoryMetrics) {
+          puzzle.solverState.storyState = puzzle.solverState.storyState || createStoryState();
+          puzzle.storyMetrics = updateStoryMetrics(
+            puzzle.graph, puzzle.solverState.storyState, null, puzzle.count);
+        }
+
         renderPuzzle(puzzle);
         // Keep running as long as we made a move (escape moves may not "improve" but should continue)
         callback(true);

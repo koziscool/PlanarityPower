@@ -2538,6 +2538,7 @@
 
     return {
       crossings: crossingCount,
+      crossingCounts: crossingCounts,
       cleanVertices: cleanIndices.length,
       cleanRatio: graph.nodes.length > 0 ? cleanIndices.length / graph.nodes.length : 1,
       cleanRegions: cleanRegions,
@@ -2564,6 +2565,63 @@
       lastMinimizeAttempt: state.lastMinimizeAttempt || null,
       lastSideFlipAttempt: state.lastSideFlipAttempt || null,
       sideFlipMoves: state.sideFlipMoves || 0
+    };
+  }
+
+  // Derived progress metrics. Assumes intersections() has run on the graph
+  // (analyzeGraphState calls it) so node.intersection flags are current.
+  function computeProgressMetrics(graph, analysis) {
+    var N = graph.nodes.length;
+    var E = graph.links.length;
+    var crossings = analysis.crossings;
+
+    var cleanEdges = 0;
+    for (var i = 0; i < graph.links.length; i++) {
+      var link = graph.links[i];
+      if (!link[0].intersection && !link[1].intersection) cleanEdges++;
+    }
+    var dirtyEdges = E - cleanEdges;
+
+    var largestCleanRegion = analysis.largestCleanRegion || 0;
+    var largestCleanRegionRatio = N > 0 ? largestCleanRegion / N : 0;
+    var cleanRegionCount = (analysis.cleanRegions || []).length;
+    var regionFragmentation = 0;
+    if (cleanRegionCount > 0 && analysis.cleanVertices > 0) {
+      regionFragmentation = 1 - (largestCleanRegion / analysis.cleanVertices);
+    }
+
+    // Near-clean: vertices with at most 1 incident crossing. Leading indicator
+    // of "about to be clean" — useful before any cleanVertices appear.
+    var nearCleanVertices = 0;
+    var cc = analysis.crossingCounts || [];
+    for (var v = 0; v < N; v++) {
+      if ((cc[v] || 0) <= 1) nearCleanVertices++;
+    }
+    var nearCleanRatio = N > 0 ? nearCleanVertices / N : 0;
+
+    var crossingPenalty = crossings / (crossings + 30);   // 0..1, 0.5 at 30 crossings
+    var progress = (
+      0.40 * (analysis.cleanRatio || 0) +
+      0.45 * largestCleanRegionRatio +
+      0.15 * (1 - crossingPenalty)
+    );
+
+    return {
+      crossings: crossings,
+      cleanVertices: analysis.cleanVertices,
+      cleanRatio: analysis.cleanRatio || 0,
+      cleanRegionCount: cleanRegionCount,
+      largestCleanRegion: largestCleanRegion,
+      largestCleanRegionRatio: largestCleanRegionRatio,
+      cleanEdges: cleanEdges,
+      cleanEdgeRatio: E > 0 ? cleanEdges / E : 0,
+      crossingsPerEdge: E > 0 ? crossings / E : 0,
+      crossingsPerDirtyEdge: dirtyEdges > 0 ? crossings / dirtyEdges : 0,
+      regionFragmentation: regionFragmentation,
+      nearCleanVertices: nearCleanVertices,
+      nearCleanRatio: nearCleanRatio,
+      topCrossingShare: analysis.topCrossingShare || 0,
+      progress: progress
     };
   }
 
@@ -7364,6 +7422,7 @@
   exports.findGrowClumpMove = findGrowClumpMove;
   exports.findClumps = findClumps;
   exports.analyzeGraphState = analyzeGraphState;
+  exports.computeProgressMetrics = computeProgressMetrics;
   exports.analyzeEstablishedRegion = analyzeEstablishedRegion;
   exports.analyzeConflictRegions = analyzeConflictRegions;
   exports.suggestDirectionalPlans = suggestDirectionalPlans;

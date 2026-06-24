@@ -64,10 +64,33 @@
     .puzzle-header {
       background: #333;
       color: #fff;
-      padding: 5px 10px;
-      font-size: 11px;
+      padding: 6px 10px;
+      font-size: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .puzzle-header .row {
       display: flex;
       justify-content: space-between;
+    }
+    .puzzle-header .metrics-row {
+      font-size: 13px;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      color: #e6f0ff;
+      letter-spacing: 0.3px;
+    }
+    .puzzle-header .metrics-row .sep {
+      color: #6a7a90;
+      margin: 0 6px;
+    }
+    .puzzle-header .metrics-row .k {
+      color: #88a;
+      margin-right: 3px;
+    }
+    .puzzle-header .metrics-row .v {
+      color: #fff;
+      font-weight: 600;
     }
     .puzzle-header.solved { background: #060; }
     .puzzle-header.stuck { background: #600; }
@@ -116,6 +139,7 @@
     var scramble = Solver.scramble;
     var solverStepCore = Solver.solverStep;
     var analyzeGraphState = Solver.analyzeGraphState;
+    var computeProgressMetrics = Solver.computeProgressMetrics;
     
     var puzzles = [];
     var running = false;
@@ -321,7 +345,32 @@
       if (puzzle.status === 'stuck') {
         statusInfo += ' (STUCK @ ' + puzzle.count + ')';
       }
-      puzzle.header.innerHTML = '<span>' + statusInfo + '</span><span>' + (puzzle.lastStrategy || '-') + '</span>';
+      function metricItem(label, value) {
+        return '<span class="k">' + label + '</span>' +
+          '<span class="v">' + value + '</span>';
+      }
+      var metricsLine = '';
+      if (analyzeGraphState && computeProgressMetrics && puzzle.status !== 'solved') {
+        puzzle.solverState = puzzle.solverState || {};
+        var analysis = analyzeGraphState(puzzle.graph, puzzle.solverState);
+        var pm = computeProgressMetrics(puzzle.graph, analysis);
+        puzzle.progressMetrics = pm;
+        var sep = '<span class="sep">·</span>';
+        metricsLine =
+          metricItem('progress', pm.progress.toFixed(3)) + sep +
+          metricItem('largest-clean', Math.round(pm.largestCleanRegionRatio * 100) + '%') + sep +
+          metricItem('clean-edges', Math.round(pm.cleanEdgeRatio * 100) + '%') + sep +
+          metricItem('near-clean', Math.round(pm.nearCleanRatio * 100) + '%') + sep +
+          metricItem('top-concentration', Math.round(pm.topCrossingShare * 100) + '%');
+      } else if (puzzle.status === 'solved') {
+        metricsLine = metricItem('prog', '1.000') +
+          '<span class="sep">·</span>' +
+          '<span class="v" style="color:#7f7">solved</span>';
+      }
+      puzzle.header.innerHTML =
+        '<div class="row"><span>' + statusInfo + '</span>' +
+        '<span>' + (puzzle.lastStrategy || '-') + '</span></div>' +
+        '<div class="row metrics-row"><span>' + metricsLine + '</span></div>';
       puzzle.header.title = 'Click puzzle to see history in console';
     }
     

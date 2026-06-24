@@ -19,6 +19,9 @@
       padding: 10px;
       background: #333;
       border-radius: 5px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
     .controls button {
       padding: 8px 16px;
@@ -31,6 +34,62 @@
     }
     .controls label {
       margin-right: 20px;
+    }
+    .control-left {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .metrics-panel {
+      width: 300px;
+      flex: 0 0 300px;
+      padding: 8px;
+      border-radius: 5px;
+      background: #303030;
+      border: 1px solid #666;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 15px;
+      line-height: 1.45;
+    }
+    .metrics-panel .metrics-title {
+      color: #bff;
+      font-family: sans-serif;
+      font-size: 13px;
+      font-weight: bold;
+      letter-spacing: 0.04em;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+    }
+    .metrics-panel .metric-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 1px solid #4a4a4a;
+      padding: 4px 0;
+    }
+    .metrics-panel .metric-label {
+      color: #c8c8c8;
+    }
+    .metrics-panel .metric-value {
+      color: #fff;
+      text-align: right;
+    }
+    .metrics-panel .metric-bucket {
+      color: #f0f0f0;
+      padding: 3px 0;
+      border-bottom: 1px solid #3d3d3d;
+    }
+    .metrics-panel .bucket-title {
+      color: #bff;
+      font-weight: bold;
+      margin-right: 8px;
+    }
+    .metrics-panel .bucket-detail {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
     }
     .main-container {
       display: flex;
@@ -115,15 +174,25 @@
 </head>
 <body>
   <div class="controls">
-    <label>Nodes: <input type="number" id="num-nodes" value="30" min="10" max="100" style="width:50px"></label>
-    <button id="reset-btn">New Graph</button>
-    <label style="margin-left: 15px;"><input type="checkbox" id="show-numbers"> Show vertex #</label>
-    <label style="margin-left: 15px;"><input type="checkbox" id="pause-on-escape" checked> Pause on escape</label>
-    <span id="status" style="margin-left: 20px;"></span>
+    <div class="control-left">
+      <label>Nodes: <input type="number" id="num-nodes" value="30" min="10" max="100" style="width:50px"></label>
+      <button id="reset-btn">New Graph</button>
+      <label><input type="checkbox" id="show-numbers"> Show vertex #</label>
+      <label><input type="checkbox" id="pause-on-escape" checked> Pause on escape</label>
+      <span id="status"></span>
+    </div>
   </div>
   
   <div class="main-container">
     <div class="puzzle" id="puzzle-container"></div>
+
+    <div id="beta-metrics" class="metrics-panel">
+      <div class="metrics-title">Development Measurements</div>
+      <div class="metric-row">
+        <span class="metric-label">Status</span>
+        <span class="metric-value">No graph</span>
+      </div>
+    </div>
     
     <div class="side-panel">
       <div class="section-label">Solver</div>
@@ -133,6 +202,13 @@
       <button id="btn-compact">Compact</button>
       <button id="btn-consolidate">Consolidate</button>
 
+      <div class="section-label">Stage 1c Reset</div>
+      <button id="btn-stage1c-suggest">Find Stage 1c Reset</button>
+      <button id="btn-stage1c-prev" disabled>Prev Candidate</button>
+      <button id="btn-stage1c-next" disabled>Next Candidate</button>
+      <button id="btn-stage1c-apply" disabled>Apply Stage 1c Reset</button>
+      <div id="stage1c-diagnosis" class="diagnosis">No Stage 1c reset plan yet.</div>
+
       <div class="section-label">Region Compaction</div>
       <button id="btn-compaction-suggest">Find Compaction Plan</button>
       <button id="btn-compaction-apply" disabled>Apply Compaction Plan</button>
@@ -140,8 +216,14 @@
 
       <div class="section-label">History</div>
       <div class="history-row">
+        <button id="btn-back-big">&laquo;15</button>
         <button id="btn-back">&larr;</button>
         <button id="btn-forward">&rarr;</button>
+        <button id="btn-forward-big">15&raquo;</button>
+      </div>
+      <div class="history-row">
+        <input type="number" id="history-jump-input" min="0" value="0" style="width:70px">
+        <button id="btn-history-jump">Go</button>
       </div>
       <button id="btn-load-history">Load Debug History</button>
       <button id="btn-write-history">Write Debug History</button>
@@ -192,6 +274,8 @@
     var analyzeGraphState = Solver.analyzeGraphState;
     var suggestStage2Restart = Solver.suggestStage2Restart;
     var suggestSeparatorReshape = Solver.suggestSeparatorReshape;
+    var suggestAnchorBreakBarrierTransfer = Solver.suggestAnchorBreakBarrierTransfer;
+    var suggestProblemChildInversions = Solver.suggestProblemChildInversions;
     var applyStage2Suggestion = Solver.applyStage2Suggestion;
     var findClumps = Solver.findClumps;
     var findEscapeMove = Solver.findEscapeMove;
@@ -242,6 +326,7 @@
         move: moveRecord || null
       });
       puzzle.historyIndex = puzzle.history.length - 1;
+      updateHistoryJumpInput(puzzle);
     }
     
     function restoreState(puzzle, index) {
@@ -258,8 +343,16 @@
       puzzle.movingNodeIndex = state.movingNode;
       puzzle.stage2Suggestion = null;
       updateStage2Diagnosis(puzzle, null);
+      updateHistoryJumpInput(puzzle);
       renderPuzzle(puzzle);
       return true;
+    }
+
+    function updateHistoryJumpInput(puzzle) {
+      var input = document.getElementById('history-jump-input');
+      if (!input || !puzzle) return;
+      input.max = Math.max(0, puzzle.history.length - 1);
+      input.value = Math.max(0, puzzle.historyIndex || 0);
     }
 
     function loadDebugHistory(payload) {
@@ -317,19 +410,26 @@
       return puzzle;
     }
     
-    function goBack(puzzle) {
-      if (puzzle.historyIndex > 0) {
-        restoreState(puzzle, puzzle.historyIndex - 1);
+    function goToHistoryIndex(puzzle, index) {
+      if (!puzzle || !puzzle.history || puzzle.history.length === 0) return;
+      var clamped = Math.max(0, Math.min(index, puzzle.history.length - 1));
+      if (restoreState(puzzle, clamped)) {
         updateStatus();
         saveStateToFile(puzzle);
       }
     }
+
+    function goBack(puzzle, amount) {
+      amount = amount || 1;
+      if (puzzle.historyIndex > 0) {
+        goToHistoryIndex(puzzle, puzzle.historyIndex - amount);
+      }
+    }
     
-    function goForward(puzzle) {
+    function goForward(puzzle, amount) {
+      amount = amount || 1;
       if (puzzle.historyIndex < puzzle.history.length - 1) {
-        restoreState(puzzle, puzzle.historyIndex + 1);
-        updateStatus();
-        saveStateToFile(puzzle);
+        goToHistoryIndex(puzzle, puzzle.historyIndex + amount);
       }
     }
     
@@ -494,6 +594,7 @@
       while (svg.firstChild) svg.removeChild(svg.firstChild);
 
       var suggestion = puzzle.stage2Suggestion;
+      var stage1cSuggestion = puzzle.stage1cSuggestion;
       if (suggestion && suggestion.triangle) {
         var polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
         polygon.setAttribute('points', suggestion.triangle.map(function(index) {
@@ -530,6 +631,8 @@
         var isTriangle = suggestion && suggestion.triangle &&
           suggestion.triangle.indexOf(i) >= 0;
         var isSuggestedComponent = suggestion && suggestion.component.indexOf(i) >= 0;
+        var isStage1cGroup = stage1cSuggestion &&
+          stage1cSuggestion.group.indexOf(i) >= 0;
         
         if (isMoving) {
           circle.setAttribute('r', '4');
@@ -551,6 +654,11 @@
           circle.setAttribute('fill', '#f66');
           circle.setAttribute('stroke', '#900');
           circle.setAttribute('stroke-width', '1');
+        } else if (isStage1cGroup) {
+          circle.setAttribute('r', '4');
+          circle.setAttribute('fill', '#8f8');
+          circle.setAttribute('stroke', '#080');
+          circle.setAttribute('stroke-width', '1.5');
         } else {
           circle.setAttribute('r', '2.5');
           circle.setAttribute('fill', node.intersection ? '#0cf' : '#fc0');
@@ -588,6 +696,21 @@
           ghost.setAttribute('stroke', '#0a0');
           ghost.setAttribute('stroke-width', '1');
           ghost.setAttribute('stroke-dasharray', '2 2');
+          ghost.setAttribute('pointer-events', 'none');
+          svg.appendChild(ghost);
+        });
+      }
+
+      if (stage1cSuggestion) {
+        stage1cSuggestion.scheduledMoves.forEach(function(position) {
+          var ghost = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          ghost.setAttribute('cx', scaleX(position.x));
+          ghost.setAttribute('cy', scaleY(position.y));
+          ghost.setAttribute('r', '4');
+          ghost.setAttribute('fill', 'none');
+          ghost.setAttribute('stroke', '#0a0');
+          ghost.setAttribute('stroke-width', '1.5');
+          ghost.setAttribute('stroke-dasharray', '3 2');
           ghost.setAttribute('pointer-events', 'none');
           svg.appendChild(ghost);
         });
@@ -1298,6 +1421,24 @@
             ') anchor ' + plan.averageAnchor.toFixed(2);
         }).join('; ')
         : 'none';
+      var edgeLength = analysis.edgeLengthByDegree;
+      var edgeLengthText = edgeLength
+        ? 'avg ' + edgeLength.averageLength.toFixed(3) +
+          '; median ' + edgeLength.medianLength.toFixed(3) +
+          '; max ' + edgeLength.maxRelativeLength.toFixed(1) + 'x median' +
+          '; edgeLog ' + edgeLength.averageLogLength.toFixed(2) +
+          '; vertLog ' + edgeLength.vertexAverageIncidentLogLength.toFixed(2)
+        : 'none';
+      var edgeLengthBucketsText = edgeLength
+        ? edgeLength.buckets.map(function(bucket) {
+          return 'd' + bucket.bucket + ': ' +
+            bucket.avgIncidentRelativeLength.toFixed(1) + 'x avg, ' +
+            bucket.maxIncidentRelativeLength.toFixed(1) + 'x max, log ' +
+            bucket.avgIncidentLogLength.toFixed(2) +
+            ' (' + bucket.vertices + 'v)';
+        }).join('; ')
+        : 'none';
+      updateBetaMetrics(analysis);
 
       document.getElementById('diagnosis').innerHTML =
         '<div>Crossings: ' + analysis.crossings + '</div>' +
@@ -1311,6 +1452,8 @@
         '<div>Conflict regions: ' + analysis.conflictRegions.length +
           ' | ' + conflictRegionsText + '</div>' +
         '<div>Directional plans: ' + directionalPlansText + '</div>' +
+        '<div>Edge length: ' + edgeLengthText + '</div>' +
+        '<div>Edge length by degree: ' + edgeLengthBucketsText + '</div>' +
         '<div>Structural plan: ' + structuralPlanText + '</div>' +
         '<div>Region extension search: ' + extensionSearchText + '</div>' +
         '<div>Crossing-heavy: ' + concentration + '</div>' +
@@ -1326,12 +1469,58 @@
       return analysis;
     }
 
+    function updateBetaMetrics(analysis) {
+      var box = document.getElementById('beta-metrics');
+      if (!box || !analysis || !analysis.edgeLengthByDegree) return;
+      var edgeLength = analysis.edgeLengthByDegree;
+      var buckets = edgeLength.buckets.map(function(bucket) {
+        return '<div class="metric-bucket">d' + bucket.bucket +
+          ' <span class="metric-label">(' + bucket.vertices + 'v)</span>' +
+          '<div class="bucket-detail"><span class="metric-label">avg</span>' +
+          '<span>' + bucket.avgIncidentRelativeLength.toFixed(2) + 'x</span></div>' +
+          '<div class="bucket-detail"><span class="metric-label">max</span>' +
+          '<span>' + bucket.maxIncidentRelativeLength.toFixed(2) + 'x</span></div>' +
+          '<div class="bucket-detail"><span class="metric-label">log</span>' +
+          '<span>' + bucket.avgIncidentLogLength.toFixed(2) + '</span></div>' +
+          '</div>';
+      }).join('');
+      box.innerHTML =
+        '<div class="metrics-title">Development Measurements</div>' +
+        '<div class="metric-row"><span class="metric-label">Crossings</span>' +
+          '<span class="metric-value">' + analysis.crossings + '</span></div>' +
+        '<div class="metric-row"><span class="metric-label">Clean</span>' +
+          '<span class="metric-value">' + analysis.cleanVertices + ' (' +
+          Math.round(analysis.cleanRatio * 100) + '%)</span></div>' +
+        '<div class="metric-row"><span class="metric-label">Edge avg</span>' +
+          '<span class="metric-value">' + edgeLength.averageLength.toFixed(3) +
+          '</span></div>' +
+        '<div class="metric-row"><span class="metric-label">Edge median</span>' +
+          '<span class="metric-value">' + edgeLength.medianLength.toFixed(3) +
+          '</span></div>' +
+        '<div class="metric-row"><span class="metric-label">Max / median</span>' +
+          '<span class="metric-value">' + edgeLength.maxRelativeLength.toFixed(2) +
+          'x</span></div>' +
+        '<div class="metric-row"><span class="metric-label">Log len / edge</span>' +
+          '<span class="metric-value">' + edgeLength.averageLogLength.toFixed(2) +
+          '</span></div>' +
+        '<div class="metric-row"><span class="metric-label">Log len / vertex</span>' +
+          '<span class="metric-value">' +
+          edgeLength.vertexAverageIncidentLogLength.toFixed(2) +
+          '</span></div>' +
+        '<div class="metrics-title" style="margin-top:8px;">By Degree</div>' +
+        buckets;
+    }
+
     function updateStage2Diagnosis(puzzle, report) {
       var box = document.getElementById('stage2-diagnosis');
       var applyButton = document.getElementById('btn-stage2-apply');
       var suggestion = puzzle && puzzle.stage2Suggestion;
       var reshape = report && report.separatorReshape &&
         report.separatorReshape.best;
+      var anchorBreak = report && report.anchorBreakBarrier &&
+        report.anchorBreakBarrier.best;
+      var problemChild = report && report.problemChildInversions &&
+        report.problemChildInversions.best;
       applyButton.disabled = !suggestion;
 
       if (!report && !suggestion) {
@@ -1358,6 +1547,32 @@
           ' candidates in ' + report.separatorReshape.elapsedMs + ' ms' +
           (report.separatorReshape.timedOut ? ' (budget reached)' : '') + '</div>'
         : '<div>No positive separator-reshape diagnostic.</div>';
+      var anchorBreakText = anchorBreak
+        ? '<div class="good">Anchor-break barrier: v' +
+          anchorBreak.barrier.join('-v') + '</div>' +
+          '<div>Chain: [' + anchorBreak.component.join(', ') +
+          '] | seeds [' + anchorBreak.seeds.join(', ') + ']</div>' +
+          '<div>Crossing edges: ' + anchorBreak.crossingEdges.map(function(edge) {
+            return 'v' + edge[0] + '-v' + edge[1];
+          }).join(', ') + '</div>' +
+          '<div>Immediate crossings: ' + anchorBreak.baseCrossings + ' -> ' +
+          anchorBreak.immediateCrossings + '</div>'
+        : '<div>No anchor-break barrier diagnostic.</div>';
+      var problemChildText = problemChild
+        ? '<div class="good">Problem-child inversion: move v' +
+          problemChild.vertex + ' around/reference v' +
+          problemChild.referenceVertex + '</div>' +
+          '<div>Vertex: d' + problemChild.vertexDegree +
+          ', crossings ' + problemChild.vertexCrossings +
+          '; reference d' + problemChild.referenceDegree + '</div>' +
+          '<div>Immediate crossings: ' + problemChild.baseCrossings + ' -> ' +
+          problemChild.immediateCrossings + '; rollout ' +
+          problemChild.finalCrossings + '</div>' +
+          '<div>Search: ' + report.problemChildInversions.candidatesTested +
+          ' candidates in ' + report.problemChildInversions.elapsedMs + ' ms' +
+          (report.problemChildInversions.timedOut ? ' (budget reached)' : '') +
+          '</div>'
+        : '<div>No problem-child inversion diagnostic.</div>';
       if (!suggestion) {
         var lowDegreeText = (report.lowDegreeCandidates || []).map(function(item) {
           return 'v' + item.vertex + '(d' + item.degree + ',c' + item.crossings + ')';
@@ -1370,7 +1585,9 @@
           '<div>Time: ' + report.elapsedMs + '/' + report.timeBudgetMs + ' ms' +
             (report.timedOut ? ' (budget reached)' : '') + '</div>' +
           '<div class="warning">No bounded restart unlocked enough progress.</div>' +
-          reshapeText;
+          reshapeText +
+          anchorBreakText +
+          problemChildText;
         return;
       }
 
@@ -1385,7 +1602,97 @@
         '<div>Clean vertex delta: ' +
           (suggestion.cleanDelta >= 0 ? '+' : '') + suggestion.cleanDelta + '</div>' +
         '<div>Simulation steps: ' + suggestion.simulationSteps + '</div>' +
-        reshapeText;
+        reshapeText +
+        anchorBreakText +
+        problemChildText;
+    }
+
+    function updateStage1cDiagnosis(puzzle, report) {
+      var box = document.getElementById('stage1c-diagnosis');
+      var button = document.getElementById('btn-stage1c-apply');
+      var prevButton = document.getElementById('btn-stage1c-prev');
+      var nextButton = document.getElementById('btn-stage1c-next');
+      var plan = puzzle && puzzle.stage1cSuggestion;
+      button.disabled = !plan;
+      var accepted = puzzle && puzzle.stage1cCandidates
+        ? puzzle.stage1cCandidates : [];
+      var selectedIndex = puzzle && puzzle.stage1cCandidateIndex || 0;
+      prevButton.disabled = accepted.length <= 1;
+      nextButton.disabled = accepted.length <= 1;
+      if (!report || !plan) {
+        if (!report) {
+          box.textContent = 'No Stage 1c reset plan yet.';
+          prevButton.disabled = true;
+          nextButton.disabled = true;
+          return;
+        }
+        var alternatives = (report.candidates || []).slice(0, 5).map(function(item, index) {
+          return '<div>' + (index + 1) + '. [' + item.group.join(', ') +
+            '] damage ' + (item.immediateDamage >= 0 ? '+' : '') +
+            item.immediateDamage + ', rollout ' + item.finalCrossings +
+            ', net ' + (item.netGain >= 0 ? '-' : '+') +
+            Math.abs(item.netGain) + ', probe +' +
+            (item.afterProbe ? item.afterProbe.bestImprovement : 0) +
+            (item.lengthProfile ? ', maxLen ' +
+              Math.round(item.lengthProfile.maxDeltaPct * 1000) / 10 + '%' : '') +
+            (item.accepted ? '' : ' <span class="warning">(not enough payback)</span>') +
+            '</div>';
+        }).join('');
+        box.innerHTML = 'No applyable Stage 1c reset plan found.' +
+          (alternatives ? '<div>Top rejected/near candidates:</div>' + alternatives : '');
+        return;
+      }
+      var before = plan.beforeProbe || report.beforeProbe || {};
+      var after = plan.afterProbe || {};
+      var length = plan.lengthProfile || {};
+      var avgLengthPct = length.averageDeltaPct === undefined
+        ? null : Math.round(length.averageDeltaPct * 1000) / 10;
+      var maxLengthPct = length.maxDeltaPct === undefined
+        ? null : Math.round(length.maxDeltaPct * 1000) / 10;
+      box.innerHTML =
+        '<div>Candidate ' + (selectedIndex + 1) + '/' +
+          Math.max(1, accepted.length) + '</div>' +
+        '<div>Group: [' + plan.group.join(', ') + ']</div>' +
+        '<div>Reason: ' + plan.reason + '</div>' +
+        '<div>Immediate crossings: ' + plan.baseCrossings + ' -> ' +
+          plan.immediateCrossings + ' (' +
+          (plan.immediateDamage >= 0 ? '+' : '') + plan.immediateDamage +
+          ' damage)</div>' +
+        '<div class="good">After Stage 1 rollout: ' + plan.finalCrossings +
+          ' (net ' + (plan.netGain >= 0 ? '-' : '+') +
+          Math.abs(plan.netGain) + ')</div>' +
+        '<div>Recovery gain from damaged state: ' + plan.recoveryGain +
+          '; rollout moves: ' + plan.rolloutMoves + '</div>' +
+        '<div>Incident edge length: avg ' +
+          (avgLengthPct === null ? '?' :
+            ((avgLengthPct >= 0 ? '+' : '') + avgLengthPct + '%')) +
+          ', max ' +
+          (maxLengthPct === null ? '?' :
+            ((maxLengthPct >= 0 ? '+' : '') + maxLengthPct + '%')) +
+          '</div>' +
+        '<div>Probe before: ' + (before.found ? 'available' : 'exhausted') +
+          ', best +' + (before.bestImprovement || 0) +
+          ' after ' + (before.positionsTested || 0) + ' tests</div>' +
+        '<div>Probe after: ' + (after.found ? 'available' : 'exhausted') +
+          ', best +' + (after.bestImprovement || 0) +
+          ' v' + (after.vertex === null || after.vertex === undefined
+            ? '-' : after.vertex) +
+          ' after ' + (after.positionsTested || 0) + ' tests</div>' +
+        '<div>Scheduled moves: ' + plan.scheduledMoves.length +
+          '; score ' + plan.score.toFixed(1) +
+          '; tested ' + report.candidatesTested + '/' +
+          report.candidatesGenerated + ' in ' + report.elapsedMs + 'ms' +
+          (report.timedOut ? ' (budget reached)' : '') + '</div>' +
+        '<div>Other candidates: ' +
+          (accepted.map(function(item, index) {
+            if (index === selectedIndex) return null;
+            return '[' + item.group.join(', ') + '] net ' +
+              (item.netGain >= 0 ? '-' : '+') + Math.abs(item.netGain) +
+              ', damage ' + (item.immediateDamage >= 0 ? '+' : '') +
+              item.immediateDamage +
+              (item.lengthProfile ? ', maxLen ' +
+                Math.round(item.lengthProfile.maxDeltaPct * 1000) / 10 + '%' : '');
+          }).filter(Boolean).slice(0, 5).join('; ') || 'none') + '</div>';
     }
 
     function updateCompactionDiagnosis(puzzle, report) {
@@ -1501,8 +1808,14 @@
       setTimeout(function() {
         var report = suggestStage2Restart(puzzle.graph);
         report.separatorReshape = suggestSeparatorReshape(puzzle.graph);
+        report.anchorBreakBarrier = suggestAnchorBreakBarrierTransfer(puzzle.graph);
+        report.problemChildInversions = suggestProblemChildInversions(puzzle.graph);
         puzzle.stage2Report = report;
-        puzzle.stage2Suggestion = report.best;
+        puzzle.stage2Suggestion = (report.anchorBreakBarrier &&
+          report.anchorBreakBarrier.best) ||
+          (report.problemChildInversions &&
+            report.problemChildInversions.best) ||
+          report.best;
         updateStage2Diagnosis(puzzle, report);
         renderPuzzle(puzzle);
         console.log('Stage 2 suggestion report:', report);
@@ -1556,6 +1869,105 @@
       renderPuzzle(puzzle);
       updateStatus();
       console.log('Applied Stage 2 suggestion:', before + ' -> ' + after + ' immediate crossings');
+    });
+
+    document.getElementById('btn-stage1c-suggest').addEventListener('click', function() {
+      if (puzzles.length === 0 || running) return;
+      var puzzle = puzzles[0];
+      var button = document.getElementById('btn-stage1c-suggest');
+      button.disabled = true;
+      button.textContent = 'Analyzing...';
+      setTimeout(function() {
+        var report = Solver.suggestStage1cResetPlan(puzzle.graph, {
+          timeBudgetMs: 900,
+          seedLimit: 0,
+          geometricSeedLimit: 40,
+          minGroupSize: 2,
+          maxGroupSize: 4,
+          scales: [0.75, 1.0],
+          targetBlends: [1.0, 1.2],
+          maxImmediateDamage: 90,
+          cleanupSteps: 25
+        });
+        puzzle.stage1cReport = report;
+        puzzle.stage1cCandidates = (report && report.candidates || [])
+          .filter(function(candidate) { return candidate.accepted; });
+        puzzle.stage1cCandidateIndex = 0;
+        puzzle.stage1cSuggestion = puzzle.stage1cCandidates[0] ||
+          (report && report.best);
+        updateStage1cDiagnosis(puzzle, report);
+        renderPuzzle(puzzle);
+        console.log('Stage 1c reset report:', report);
+        button.disabled = false;
+        button.textContent = 'Find Stage 1c Reset';
+      }, 0);
+    });
+
+    function selectStage1cCandidate(delta) {
+      if (puzzles.length === 0) return;
+      var puzzle = puzzles[0];
+      var candidates = puzzle.stage1cCandidates || [];
+      if (candidates.length === 0) return;
+      puzzle.stage1cCandidateIndex =
+        (puzzle.stage1cCandidateIndex + delta + candidates.length) %
+        candidates.length;
+      puzzle.stage1cSuggestion = candidates[puzzle.stage1cCandidateIndex];
+      updateStage1cDiagnosis(puzzle, puzzle.stage1cReport);
+      renderPuzzle(puzzle);
+    }
+
+    document.getElementById('btn-stage1c-prev').addEventListener('click', function() {
+      selectStage1cCandidate(-1);
+    });
+
+    document.getElementById('btn-stage1c-next').addEventListener('click', function() {
+      selectStage1cCandidate(1);
+    });
+
+    document.getElementById('btn-stage1c-apply').addEventListener('click', function() {
+      if (puzzles.length === 0) return;
+      var puzzle = puzzles[0];
+      var plan = puzzle.stage1cSuggestion;
+      if (!plan) return;
+      plan.scheduledMoves.forEach(function(scheduled, index) {
+        var node = puzzle.graph.nodes[scheduled.index];
+        var fromX = node[0], fromY = node[1];
+        var crossingsBefore = intersections(puzzle.graph.links);
+        node[0] = scheduled.x;
+        node[1] = scheduled.y;
+        var crossingsAfter = intersections(puzzle.graph.links);
+        puzzle.moves++;
+        puzzle.lastStrategy = 'stage1c-group-reset';
+        var moveRecord = makeMoveRecord(
+          'algorithm', puzzle.lastStrategy, scheduled.index,
+          fromX, fromY, scheduled.x, scheduled.y,
+          crossingsBefore, crossingsAfter, {
+            reason: plan.reason,
+            group: plan.group.slice(),
+            sequenceStep: index + 1,
+            sequenceLength: plan.scheduledMoves.length,
+            baseCrossings: plan.baseCrossings,
+            immediateCrossings: plan.immediateCrossings,
+            projectedFinalCrossings: plan.finalCrossings,
+            projectedNetGain: plan.netGain,
+            projectedRecoveryGain: plan.recoveryGain,
+            afterProbe: plan.afterProbe
+          });
+        logMove(puzzle.moves, moveRecord);
+        saveState(puzzle, moveRecord);
+      });
+      var after = intersections(puzzle.graph.links);
+      puzzle.status = 'running';
+      puzzle.solverState = {};
+      puzzle.count = after;
+      puzzle.stage1cSuggestion = null;
+      puzzle.stage1cReport = null;
+      puzzle.stage1cCandidates = [];
+      puzzle.stage1cCandidateIndex = 0;
+      updateStage1cDiagnosis(puzzle, null);
+      saveStateToFile(puzzle);
+      renderPuzzle(puzzle);
+      updateStatus();
     });
 
     document.getElementById('btn-compaction-suggest').addEventListener('click', function() {
@@ -1717,11 +2129,27 @@
     });
     
     // History buttons
+    document.getElementById('btn-back-big').addEventListener('click', function() {
+      if (puzzles.length > 0) goBack(puzzles[0], 15);
+    });
     document.getElementById('btn-back').addEventListener('click', function() {
       if (puzzles.length > 0) goBack(puzzles[0]);
     });
     document.getElementById('btn-forward').addEventListener('click', function() {
       if (puzzles.length > 0) goForward(puzzles[0]);
+    });
+    document.getElementById('btn-forward-big').addEventListener('click', function() {
+      if (puzzles.length > 0) goForward(puzzles[0], 15);
+    });
+    document.getElementById('btn-history-jump').addEventListener('click', function() {
+      if (puzzles.length === 0) return;
+      var input = document.getElementById('history-jump-input');
+      goToHistoryIndex(puzzles[0], parseInt(input.value, 10) || 0);
+    });
+    document.getElementById('history-jump-input').addEventListener('keydown', function(event) {
+      if (event.key === 'Enter' && puzzles.length > 0) {
+        goToHistoryIndex(puzzles[0], parseInt(event.target.value, 10) || 0);
+      }
     });
     document.getElementById('btn-load-history').addEventListener('click', function() {
       document.getElementById('history-file-input').click();

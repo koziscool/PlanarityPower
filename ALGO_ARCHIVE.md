@@ -225,6 +225,18 @@ straddling, established-region growth, clean-vertex growth, crossing change,
 and a preliminary anchor-disruption penalty. Interactive reports its best
 candidate but does not enable automatic application.
 
+`suggestProblemChildInversions()` is a diagnostic-only Stage 2 candidate
+ranker for the case where the solver keeps working around a troublesome vertex
+without changing its relevant topological side/sector. It ranks
+crossing-involved vertices, samples single-vertex placements hugging each
+adjacent reference vertex from multiple side sectors, and evaluates the best
+few with a short deterministic Stage 1 rollout. This is meant to expose moves
+like "v14 needs to hug outside v0" or "cheap problem child moves outside/inside
+a reference structure." Solver exports include the last report as
+`finalDiagnostics.lastProblemChildInversionSearch`; Interactive displays it
+from the Stage 2 suggestion button. The automatic solver records the diagnostic
+near the stuck boundary but does not execute it yet.
+
 `analyzeGraphState()` partitions current crossing events into unresolved
 conflict regions. Events are grouped when they share vertices, or when nearby
 events touch through an abstract graph edge. Each region reports its crossing
@@ -493,6 +505,23 @@ incident-edge cache, incremental escape scoring, profiler hooks, and fixed-batch
 benchmark support. This makes the next A/B cycle compare from the last clearly
 defensible performance point instead of from the experimental late-policy mix.
 
+### June 2026 edge-length diagnostics
+
+Added graph-quality diagnostics for edge length by degree. These are display
+metrics only, not auto-solver policy. `analyzeGraphState()` now reports global
+edge average, median, max/median ratio, average log edge length over edges,
+average per-vertex incident log edge length, and per-degree bucket summaries
+(`1`, `2`, `3`, `4`, `5`, `6-8`, `9+`) for average incident length, average
+incident log length, average max incident length, and max incident length
+relative to graph median.
+
+Motivation: manual Stage 1c reset examples suggest productive grouped moves
+often reduce stretched incident edges, especially the worst incident edge,
+even when immediate crossing count temporarily increases. Degree buckets are
+kept separate because low-degree vertices and high-degree dandelion centers
+have different geometric baselines. Aggregated graph-relative changes are still
+useful within the same graph because vertex degrees are fixed.
+
 Open: cadence of every-8 is a guess; needs tuning against `adaptiveStatsBuffer`.
 The big list's utility is the empirical question — earlier finding was that
 high-degree-vertex moves are usually unproductive, but the richer probe set
@@ -505,6 +534,38 @@ graphs showed structural improvement but solve-rate didn't beat the prior
 baseline. Reverted to single main list (top 18 from full ranked pool, cheap
 probe spec, random θ retained) while we evaluate scale-aware sizing. The
 `runDescentPass` helper and big-list spec stay in place for re-enable.
+
+### June 2026 Stage 1c reset hook
+
+Added a conservative automatic Stage 1c reset hook before escape moves. It is
+currently limited to small graphs (`n <= 25`, crossings `<= 60`) and fires only
+after ordinary Stage 1 descent has stalled. The hook tries small geometric
+groups, allows temporary crossing damage, then scores whether deterministic
+Stage 1 rollout pays that damage back with net improvement.
+
+Interactive's `pauseBeforeEscape` still pauses before this hook, so the normal
+human-in-the-loop workflow remains inspectable. TurboSolver and Solver use the
+hook automatically because they run without that pause.
+
+The Stage 1c evaluator uses fixed-angle, zero-random-sample Stage 1 probes and
+rollouts. That is intentional: the normal solver may still use randomness, but
+candidate evaluation for this hook needs to be repeatable enough for A/B testing
+and for comparing against manual miss logs.
+
+### June 2026 anchor-break barrier diagnostic
+
+Added an inspectable Stage 2 diagnostic for barrier transfers with a local
+anchor break. This is based on cases where a dominant barrier edge remains, but
+the movable structure is not a single crossing endpoint. Instead, the relevant
+constraint chain terminates in a weak/slack vertex, so the whole small chain can
+be transferred across the barrier.
+
+The first implementation detects crossing edges against candidate barrier edges,
+builds the same-side connected component from the crossing endpoints, orders the
+component from nearest-to-barrier outward toward the anchor break, and proposes
+target-side positions using already-transferred/target-side neighbors. It is
+currently surfaced through Interactive's Stage 2 suggestion path, not automatic
+solver policy.
 
 *Last updated: June 2026*
 *To restore a removed strategy, retrieve it from Git history and benchmark it before reconnecting it.*

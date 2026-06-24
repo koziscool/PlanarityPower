@@ -1956,6 +1956,483 @@
     };
   }
 
+  function crossingPairsForGraph(graph) {
+    var pairs = [];
+    for (var i = 0; i < graph.links.length; i++) {
+      for (var j = i + 1; j < graph.links.length; j++) {
+        if (shareEndpoint(graph.links[i], graph.links[j])) continue;
+        if (!intersect(graph.links[i], graph.links[j])) continue;
+        pairs.push({
+          edgeA: i,
+          edgeB: j
+        });
+      }
+    }
+    return pairs;
+  }
+
+  function barrierCrossingEdges(barrierIndex, crossingPairs) {
+    var result = [];
+    crossingPairs.forEach(function(pair) {
+      if (pair.edgeA === barrierIndex) result.push(pair.edgeB);
+      if (pair.edgeB === barrierIndex) result.push(pair.edgeA);
+    });
+    return result.filter(function(edgeIndex, index) {
+      return result.indexOf(edgeIndex) === index;
+    });
+  }
+
+  function sameSideComponentFromSeeds(graph, barrier, seeds, sideSign, limit) {
+    var queue = seeds.slice();
+    var seen = {};
+    var component = [];
+    seeds.forEach(function(seed) { seen[seed] = true; });
+
+    while (queue.length && component.length < limit) {
+      var index = queue.shift();
+      var nodeSide = sideOfEdge(barrier, graph.nodes[index]);
+      if (Math.abs(nodeSide) < 1e-10 || Math.sign(nodeSide) !== sideSign) {
+        continue;
+      }
+      component.push(index);
+      getNeighbors(graph, graph.nodes[index]).forEach(function(neighbor) {
+        var neighborIndex = graph.nodes.indexOf(neighbor);
+        if (neighborIndex < 0 || seen[neighborIndex]) return;
+        var neighborSide = sideOfEdge(barrier, neighbor);
+        if (Math.abs(neighborSide) < 1e-10 ||
+            Math.sign(neighborSide) !== sideSign) {
+          return;
+        }
+        seen[neighborIndex] = true;
+        queue.push(neighborIndex);
+      });
+    }
+    return component;
+  }
+
+  function anchorBreakTransferPositions(graph, barrier, component, targetSign,
+      margin) {
+    var simulation = cloneGraph(graph);
+    var barrierA = graph.nodes.indexOf(barrier[0]);
+    var barrierB = graph.nodes.indexOf(barrier[1]);
+    var simBarrier = [simulation.nodes[barrierA], simulation.nodes[barrierB]];
+    var edgeDx = simBarrier[1][0] - simBarrier[0][0];
+    var edgeDy = simBarrier[1][1] - simBarrier[0][1];
+    var edgeLength = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy);
+    if (edgeLength < 1e-8) return null;
+    var normal = [-edgeDy / edgeLength, edgeDx / edgeLength];
+    if (targetSign < 0) normal = [-normal[0], -normal[1]];
+
+    var ordered = component.slice().sort(function(a, b) {
+      return Math.abs(sideOfEdge(barrier, graph.nodes[a])) -
+        Math.abs(sideOfEdge(barrier, graph.nodes[b]));
+    });
+    var positions = [];
+
+    ordered.forEach(function(index) {
+      var points = [];
+      getNeighbors(simulation, simulation.nodes[index]).forEach(function(neighbor) {
+        var neighborIndex = simulation.nodes.indexOf(neighbor);
+        if (neighborIndex === barrierA || neighborIndex === barrierB ||
+            sideOfEdge(simBarrier, neighbor) * targetSign > 0) {
+          points.push(neighbor);
+        }
+      });
+      if (points.length === 0) points.push(simBarrier[0], simBarrier[1]);
+      var target = centroid(points);
+      var signedDistance = sideOfEdge(simBarrier, target) / edgeLength;
+      var needed = margin - signedDistance * targetSign;
+      if (needed > 0) {
+        target = [
+          target[0] + normal[0] * needed,
+          target[1] + normal[1] * needed
+        ];
+      }
+      var x = Math.max(0.02, Math.min(0.98, target[0]));
+      var y = Math.max(0.02, Math.min(0.98, target[1]));
+      simulation.nodes[index][0] = x;
+      simulation.nodes[index][1] = y;
+      positions.push({
+        index: index,
+        x: x,
+        y: y,
+        mode: 'anchor-break-transfer'
+      });
+    });
+
+    return {
+      order: ordered,
+      positions: positions
+    };
+  }
+
+  function suggestAnchorBreakBarrierTransfer(graph, options) {
+    options = options || {};
+    var startedAt = Date.now();
+    var timeBudgetMs = options.timeBudgetMs || 120;
+    var componentLimit = options.componentLimit || 8;
+    var baseCrossings = intersections(graph.links);
+    var crossingPairs = crossingPairsForGraph(graph);
+    var candidates = [];
+    var tested = 0;
+
+    if (baseCrossings === 0 || crossingPairs.length === 0) {
+      return {
+        type: 'anchor-break-barrier-transfer',
+        baseCrossings: baseCrossings,
+        candidatesTested: 0,
+        elapsedMs: 0,
+        timedOut: false,
+        best: null,
+        candidates: []
+      };
+    }
+
+    var barrierCounts = {};
+    crossingPairs.forEach(function(pair) {
+      barrierCounts[pair.edgeA] = (barrierCounts[pair.edgeA] || 0) + 1;
+      barrierCounts[pair.edgeB] = (barrierCounts[pair.edgeB] || 0) + 1;
+    });
+    var barriers = Object.keys(barrierCounts).map(Number)
+      .sort(function(a, b) { return barrierCounts[b] - barrierCounts[a]; })
+      .slice(0, options.barrierLimit || 4);
+
+    for (var bi = 0; bi < barriers.length &&
+        Date.now() - startedAt < timeBudgetMs; bi++) {
+      var barrierIndex = barriers[bi];
+      var barrier = graph.links[barrierIndex];
+      var barrierA = graph.nodes.indexOf(barrier[0]);
+      var barrierB = graph.nodes.indexOf(barrier[1]);
+      var crossingEdges = barrierCrossingEdges(barrierIndex, crossingPairs);
+      if (crossingEdges.length === 0) continue;
+
+      [-1, 1].forEach(function(sourceSign) {
+        if (Date.now() - startedAt >= timeBudgetMs) return;
+        var seeds = [];
+        crossingEdges.forEach(function(edgeIndex) {
+          graph.links[edgeIndex].forEach(function(node) {
+            var index = graph.nodes.indexOf(node);
+            if (index === barrierA || index === barrierB) return;
+            var side = sideOfEdge(barrier, node);
+            if (Math.abs(side) > 1e-10 && Math.sign(side) === sourceSign &&
+                seeds.indexOf(index) < 0) {
+              seeds.push(index);
+            }
+          });
+        });
+        if (seeds.length === 0) return;
+
+        var component = sameSideComponentFromSeeds(
+          graph, barrier, seeds, sourceSign, componentLimit + 1);
+        if (component.length === 0 || component.length > componentLimit) return;
+
+        var transfer = anchorBreakTransferPositions(
+          graph, barrier, component, -sourceSign,
+          options.margin === undefined ? 0.005 : options.margin);
+        if (!transfer) return;
+
+        var simulation = cloneGraph(graph);
+        applyGroupPositions(simulation, transfer.positions);
+        var immediateCrossings = intersections(simulation.links);
+        tested++;
+
+        var candidate = {
+          type: 'anchor-break-barrier-transfer',
+          strategy: 'stage2-anchor-break-barrier-transfer',
+          reason: 'transfer chain [' + transfer.order.join(',') +
+            '] across barrier v' + barrierA + '-v' + barrierB,
+          barrier: [barrierA, barrierB],
+          barrierEdgeIndex: barrierIndex,
+          barrierCrossings: barrierCounts[barrierIndex],
+          crossingEdges: crossingEdges.map(function(edgeIndex) {
+            return [
+              graph.nodes.indexOf(graph.links[edgeIndex][0]),
+              graph.nodes.indexOf(graph.links[edgeIndex][1])
+            ];
+          }),
+          seeds: seeds,
+          component: transfer.order,
+          positions: transfer.positions,
+          baseCrossings: baseCrossings,
+          immediateCrossings: immediateCrossings,
+          immediateDamage: Math.max(0, immediateCrossings - baseCrossings),
+          finalCrossings: immediateCrossings,
+          downstreamImprovement: baseCrossings - immediateCrossings,
+          simulationSteps: 0,
+          cleanDelta: 0,
+          accepted: immediateCrossings < baseCrossings,
+          score: immediateCrossings * 100 + component.length +
+            Math.max(0, immediateCrossings - baseCrossings) * 10
+        };
+        candidates.push(candidate);
+      });
+    }
+
+    candidates.sort(function(a, b) {
+      return a.score - b.score ||
+        b.barrierCrossings - a.barrierCrossings ||
+        a.component.length - b.component.length;
+    });
+    return {
+      type: 'anchor-break-barrier-transfer',
+      baseCrossings: baseCrossings,
+      candidatesTested: tested,
+      elapsedMs: Date.now() - startedAt,
+      timedOut: Date.now() - startedAt >= timeBudgetMs,
+      best: candidates.length && candidates[0].accepted ? candidates[0] : null,
+      candidates: candidates.slice(0, options.keepCandidates || 8)
+    };
+  }
+
+  function suggestProblemChildInversions(graph, options) {
+    options = options || {};
+    var startedAt = Date.now();
+    var timeBudgetMs = options.timeBudgetMs || 160;
+    var candidateLimit = options.candidateLimit || 220;
+    var perVertexLimit = options.perVertexLimit || 80;
+    var vertexLimit = options.vertexLimit || 10;
+    var rolloutLimit = options.rolloutLimit || 10;
+    var rolloutSteps = options.rolloutSteps || 12;
+    var baseCrossings = intersections(graph.links);
+    var baseClean = graph.nodes.filter(function(node) {
+      return !node.intersection;
+    }).length;
+    var crossingCounts = getCrossingCounts(graph);
+    var tested = 0;
+    var timedOut = false;
+    var center = graph.nodes.reduce(function(sum, node) {
+      sum[0] += node[0];
+      sum[1] += node[1];
+      return sum;
+    }, [0, 0]);
+    center[0] /= Math.max(1, graph.nodes.length);
+    center[1] /= Math.max(1, graph.nodes.length);
+
+    if (baseCrossings === 0) {
+      return {
+        type: 'problem-child-inversion',
+        baseCrossings: 0,
+        candidatesTested: 0,
+        elapsedMs: 0,
+        timeBudgetMs: timeBudgetMs,
+        timedOut: false,
+        best: null,
+        candidates: []
+      };
+    }
+
+    function distance(a, b) {
+      var dx = a[0] - b[0];
+      var dy = a[1] - b[1];
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function normalize(dx, dy) {
+      var len = Math.sqrt(dx * dx + dy * dy);
+      if (len < 1e-8) return null;
+      return [dx / len, dy / len];
+    }
+
+    function addDirection(directions, dx, dy) {
+      var dir = normalize(dx, dy);
+      if (!dir) return;
+      for (var i = 0; i < directions.length; i++) {
+        if (directions[i][0] * dir[0] + directions[i][1] * dir[1] > 0.97) {
+          return;
+        }
+      }
+      directions.push(dir);
+    }
+
+    var ranked = crossingCounts.map(function(count, index) {
+      var node = graph.nodes[index];
+      var edges = getNodeEdges(graph, node);
+      var maxIncidentLength = 0;
+      edges.forEach(function(edge) {
+        var other = edge[0] === node ? edge[1] : edge[0];
+        maxIncidentLength = Math.max(maxIncidentLength, distance(node, other));
+      });
+      return {
+        index: index,
+        crossings: count,
+        degree: edges.length,
+        maxIncidentLength: maxIncidentLength,
+        score: count * 4 + count / Math.max(1, edges.length) +
+          maxIncidentLength * 2
+      };
+    }).filter(function(item) {
+      return item.crossings > 0 && item.degree > 0;
+    }).sort(function(a, b) {
+      return b.score - a.score || b.crossings - a.crossings;
+    }).slice(0, vertexLimit);
+
+    var candidates = [];
+    var seen = {};
+    var radii = options.radii || [0.04, 0.06, 0.085, 0.115, 0.15];
+    for (var ri = 0; ri < ranked.length &&
+        tested < candidateLimit &&
+        Date.now() - startedAt < timeBudgetMs; ri++) {
+      var item = ranked[ri];
+      var vertexIndex = item.index;
+      var node = graph.nodes[vertexIndex];
+      var vertexTested = 0;
+      var neighbors = getNeighbors(graph, node).map(function(neighbor) {
+        return graph.nodes.indexOf(neighbor);
+      }).filter(function(index) {
+        return index >= 0;
+      });
+      var otherNeighborCenter = [0, 0];
+      neighbors.forEach(function(neighborIndex) {
+        otherNeighborCenter[0] += graph.nodes[neighborIndex][0];
+        otherNeighborCenter[1] += graph.nodes[neighborIndex][1];
+      });
+      otherNeighborCenter[0] /= Math.max(1, neighbors.length);
+      otherNeighborCenter[1] /= Math.max(1, neighbors.length);
+
+      for (var ni = 0; ni < neighbors.length &&
+          tested < candidateLimit &&
+          vertexTested < perVertexLimit &&
+          Date.now() - startedAt < timeBudgetMs; ni++) {
+        var referenceIndex = neighbors[ni];
+        var reference = graph.nodes[referenceIndex];
+        var directions = [];
+
+        // These first directions are the human-readable cases: outside the
+        // graph center, away from the current problem child, and away from the
+        // rest of the child vertex's neighbor fan.
+        addDirection(directions, reference[0] - center[0], reference[1] - center[1]);
+        addDirection(directions, reference[0] - node[0], reference[1] - node[1]);
+        addDirection(directions,
+          reference[0] - otherNeighborCenter[0],
+          reference[1] - otherNeighborCenter[1]);
+
+        // Add a coarse full-sector sweep so this remains a topology/side-change
+        // diagnostic rather than a hard-coded "outside viewport" move.
+        for (var sector = 0; sector < 12; sector++) {
+          var angle = Math.PI * 2 * sector / 12;
+          addDirection(directions, Math.cos(angle), Math.sin(angle));
+        }
+
+        for (var di = 0; di < directions.length &&
+            tested < candidateLimit &&
+            vertexTested < perVertexLimit &&
+            Date.now() - startedAt < timeBudgetMs; di++) {
+          var direction = directions[di];
+          for (var si = 0; si < radii.length &&
+              tested < candidateLimit &&
+              vertexTested < perVertexLimit &&
+              Date.now() - startedAt < timeBudgetMs; si++) {
+            var radius = radii[si];
+            var toX = Math.max(0.02, Math.min(0.98,
+              reference[0] + direction[0] * radius));
+            var toY = Math.max(0.02, Math.min(0.98,
+              reference[1] + direction[1] * radius));
+            var key = vertexIndex + ':' + toX.toFixed(3) + ',' + toY.toFixed(3);
+            if (seen[key]) continue;
+            seen[key] = true;
+            if (isTooClose(graph, node, toX, toY)) continue;
+            tested++;
+            vertexTested++;
+
+            var simulation = cloneGraph(graph);
+            simulation.nodes[vertexIndex][0] = toX;
+            simulation.nodes[vertexIndex][1] = toY;
+            var immediateCrossings = intersections(simulation.links);
+            var immediateClean = simulation.nodes.filter(function(simNode) {
+              return !simNode.intersection;
+            }).length;
+            var displacement = distance(node, [toX, toY]);
+            var immediateImprovement = baseCrossings - immediateCrossings;
+            var candidate = {
+              type: 'problem-child-inversion',
+              strategy: 'stage2-problem-child-inversion',
+              component: [vertexIndex],
+              positions: [{
+                index: vertexIndex,
+                x: toX,
+                y: toY,
+                mode: 'problem-child-inversion',
+                reference: referenceIndex
+              }],
+              vertex: vertexIndex,
+              referenceVertex: referenceIndex,
+              referenceDegree: getNodeEdges(graph, reference).length,
+              vertexDegree: item.degree,
+              vertexCrossings: item.crossings,
+              baseCrossings: baseCrossings,
+              immediateCrossings: immediateCrossings,
+              immediateDamage: Math.max(0, immediateCrossings - baseCrossings),
+              finalCrossings: immediateCrossings,
+              downstreamImprovement: immediateImprovement,
+              cleanDelta: immediateClean - baseClean,
+              simulationSteps: 0,
+              displacement: displacement,
+              reason: 'move problem-child v' + vertexIndex +
+                ' to hug/reference v' + referenceIndex +
+                ' from a new side sector',
+              accepted: immediateImprovement > 0,
+              score: immediateCrossings * 100 -
+                Math.max(0, immediateImprovement) * 12 +
+                Math.max(0, immediateCrossings - baseCrossings) * 20 +
+                displacement * 4
+            };
+            candidates.push(candidate);
+          }
+        }
+      }
+    }
+
+    if (Date.now() - startedAt >= timeBudgetMs) timedOut = true;
+    candidates.sort(function(a, b) {
+      return a.score - b.score ||
+        b.vertexCrossings - a.vertexCrossings ||
+        a.displacement - b.displacement;
+    });
+
+    var rolloutCount = Math.min(rolloutLimit, candidates.length);
+    for (var ci = 0; ci < rolloutCount &&
+        Date.now() - startedAt < timeBudgetMs; ci++) {
+      var rolloutCandidate = candidates[ci];
+      var rolloutGraph = cloneGraph(graph);
+      applyGroupPositions(rolloutGraph, rolloutCandidate.positions);
+      var rollout = stage1Rollout(rolloutGraph, rolloutSteps);
+      rolloutCandidate.finalCrossings = rollout.finalCrossings;
+      rolloutCandidate.downstreamImprovement =
+        baseCrossings - rollout.finalCrossings;
+      rolloutCandidate.simulationSteps = rollout.moves.length;
+      rolloutCandidate.cleanDelta = rolloutGraph.nodes.filter(function(node) {
+        return !node.intersection;
+      }).length - baseClean;
+      rolloutCandidate.accepted = rolloutCandidate.immediateCrossings < baseCrossings ||
+        rolloutCandidate.finalCrossings < baseCrossings;
+      rolloutCandidate.score = rolloutCandidate.finalCrossings * 100 +
+        rolloutCandidate.immediateDamage * 12 -
+        Math.max(0, rolloutCandidate.downstreamImprovement) * 8 -
+        rolloutCandidate.cleanDelta * 2 +
+        rolloutCandidate.displacement * 4;
+    }
+    if (Date.now() - startedAt >= timeBudgetMs) timedOut = true;
+
+    candidates.sort(function(a, b) {
+      return a.score - b.score ||
+        b.downstreamImprovement - a.downstreamImprovement ||
+        b.vertexCrossings - a.vertexCrossings;
+    });
+
+    return {
+      type: 'problem-child-inversion',
+      baseCrossings: baseCrossings,
+      candidateVertices: ranked.map(function(item) { return item.index; }),
+      candidatesTested: tested,
+      elapsedMs: Date.now() - startedAt,
+      timeBudgetMs: timeBudgetMs,
+      timedOut: timedOut,
+      best: candidates.length > 0 && candidates[0].accepted
+        ? candidates[0] : null,
+      candidates: candidates.slice(0, options.keepCandidates || 8)
+    };
+  }
+
   function recordCrossingHistory(state, crossingCount) {
     state.crossingHistory = state.crossingHistory || [];
     var lastHistory = state.crossingHistory[state.crossingHistory.length - 1];
@@ -2023,6 +2500,7 @@
     var conflictRegions = analyzeConflictRegions(graph);
     var directionalPlans = suggestDirectionalPlans(
       graph, conflictRegions, establishedRegions.length > 0 ? establishedRegions[0] : null);
+    var edgeLengthByDegree = analyzeEdgeLengthByDegree(graph, adjacency);
 
     var concentration = crossingCounts.map(function(count, index) {
       return {
@@ -2068,6 +2546,7 @@
       bestEstablishedRegion: establishedRegions.length > 0 ? establishedRegions[0] : null,
       conflictRegions: conflictRegions,
       directionalPlans: directionalPlans,
+      edgeLengthByDegree: edgeLengthByDegree,
       crossingConcentration: concentration.slice(0, 5),
       topCrossingShare: topCrossingShare,
       recentCrossings: recent,
@@ -2080,6 +2559,8 @@
       lastBarrierTransferSearch: state.lastBarrierTransferSearch || null,
       lastCompactionSearch: state.lastCompactionSearch || null,
       lastRegionExtensionSearch: state.lastRegionExtensionSearch || null,
+      lastProblemChildInversionSearch:
+        state.lastProblemChildInversionSearch || null,
       lastMinimizeAttempt: state.lastMinimizeAttempt || null,
       lastSideFlipAttempt: state.lastSideFlipAttempt || null,
       sideFlipMoves: state.sideFlipMoves || 0
@@ -3006,7 +3487,10 @@
           ? 'stage3-contained-triangle-solve' :
         state.activeStructuralPlan &&
           state.activeStructuralPlan.type === 'dominant-barrier-transfer'
-          ? 'stage3-dominant-barrier-transfer' : 'stage2-proven-solve',
+          ? 'stage3-dominant-barrier-transfer' :
+        state.activeStructuralPlan &&
+          state.activeStructuralPlan.type === 'stage1c-reset'
+          ? 'stage1c-reset' : 'stage2-proven-solve',
       search: {
         reason: state.pendingStructuralReason || null,
         projectedFinalCrossings: state.activeStructuralPlan
@@ -5014,7 +5498,9 @@
     // the ranked pool. runDescentPass + big-list spec retained for re-enable.
     var mainList = ranked.slice(0, mainListLimit);
 
-    var theta = Math.random() * Math.PI * 2;
+    var theta = options.theta === undefined
+      ? Math.random() * Math.PI * 2
+      : options.theta;
 
     var ctx = {
       graph: graph,
@@ -5064,6 +5550,480 @@
 
     if (result.move) result.move.search = attempt;
     return result.move;
+  }
+
+  function externalAnchorCentroidForGroup(graph, group) {
+    var inGroup = {};
+    group.forEach(function(index) { inGroup[index] = true; });
+    var points = [];
+    group.forEach(function(index) {
+      getNeighbors(graph, graph.nodes[index]).forEach(function(neighbor) {
+        var neighborIndex = graph.nodes.indexOf(neighbor);
+        if (neighborIndex >= 0 && !inGroup[neighborIndex]) {
+          points.push(neighbor);
+        }
+      });
+    });
+    return centroid(points);
+  }
+
+  function groupResetPositions(graph, group, targetCenter, scale) {
+    var groupNodes = group.map(function(index) { return graph.nodes[index]; });
+    var center = centroid(groupNodes);
+    if (!center || !targetCenter) return null;
+    return group.map(function(index) {
+      var node = graph.nodes[index];
+      return {
+        index: index,
+        x: Math.max(0.02, Math.min(0.98,
+          targetCenter[0] + (node[0] - center[0]) * scale)),
+        y: Math.max(0.02, Math.min(0.98,
+          targetCenter[1] + (node[1] - center[1]) * scale))
+      };
+    });
+  }
+
+  function uniqueGroup(indices, limit) {
+    var seen = {};
+    var result = [];
+    for (var i = 0; i < indices.length && result.length < limit; i++) {
+      var index = indices[i];
+      if (index < 0 || seen[index]) continue;
+      seen[index] = true;
+      result.push(index);
+    }
+    return result;
+  }
+
+  function groupKey(group) {
+    return group.slice().sort(function(a, b) { return a - b; }).join(',');
+  }
+
+  function pointDistance(a, b) {
+    var dx = a[0] - b[0];
+    var dy = a[1] - b[1];
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function graphEdgeLengths(graph) {
+    return graph.links.map(function(link) {
+      return pointDistance(link[0], link[1]);
+    });
+  }
+
+  function incidentLengthProfile(graph, group) {
+    var inGroup = {};
+    group.forEach(function(index) { inGroup[index] = true; });
+    var lengths = [];
+    for (var i = 0; i < graph.links.length; i++) {
+      var a = graph.nodes.indexOf(graph.links[i][0]);
+      var b = graph.nodes.indexOf(graph.links[i][1]);
+      if (inGroup[a] || inGroup[b]) {
+        lengths.push(pointDistance(graph.links[i][0], graph.links[i][1]));
+      }
+    }
+    var sum = lengths.reduce(function(total, value) {
+      return total + value;
+    }, 0);
+    return {
+      count: lengths.length,
+      sum: sum,
+      average: lengths.length ? sum / lengths.length : 0,
+      max: lengths.length ? Math.max.apply(null, lengths) : 0
+    };
+  }
+
+  function lengthDeltaProfile(beforeGraph, afterGraph, group) {
+    var before = incidentLengthProfile(beforeGraph, group);
+    var after = incidentLengthProfile(afterGraph, group);
+    var graphMedian = median(graphEdgeLengths(beforeGraph));
+    return {
+      before: before,
+      after: after,
+      averageDelta: after.average - before.average,
+      averageDeltaPct: before.average
+        ? (after.average - before.average) / before.average : 0,
+      sumDelta: after.sum - before.sum,
+      sumDeltaPct: before.sum ? (after.sum - before.sum) / before.sum : 0,
+      maxDelta: after.max - before.max,
+      maxDeltaPct: before.max ? (after.max - before.max) / before.max : 0,
+      maxRelativeBefore: graphMedian ? before.max / graphMedian : 0,
+      maxRelativeAfter: graphMedian ? after.max / graphMedian : 0
+    };
+  }
+
+  function degreeBucket(degree) {
+    if (degree <= 5) return String(degree);
+    if (degree <= 8) return '6-8';
+    return '9+';
+  }
+
+  function analyzeEdgeLengthByDegree(graph, adjacency) {
+    var epsilon = 1e-6;
+    var lengths = graphEdgeLengths(graph);
+    var graphMedian = median(lengths);
+    var totalLength = 0;
+    var totalLogLength = 0;
+    var maxLength = 0;
+    for (var i = 0; i < lengths.length; i++) {
+      totalLength += lengths[i];
+      totalLogLength += Math.log(epsilon + lengths[i]);
+      if (lengths[i] > maxLength) maxLength = lengths[i];
+    }
+
+    var buckets = {};
+    var vertexAvgIncidentLogLengthSum = 0;
+    var verticesWithIncidentEdges = 0;
+    for (var v = 0; v < graph.nodes.length; v++) {
+      var incident = getNodeEdges(graph, graph.nodes[v]).map(function(edge) {
+        return pointDistance(edge[0], edge[1]);
+      });
+      if (incident.length === 0) continue;
+      verticesWithIncidentEdges++;
+      var sum = incident.reduce(function(total, value) {
+        return total + value;
+      }, 0);
+      var logSum = incident.reduce(function(total, value) {
+        return total + Math.log(epsilon + value);
+      }, 0);
+      vertexAvgIncidentLogLengthSum += logSum / incident.length;
+      var vertexMax = Math.max.apply(null, incident);
+      var bucketKey = degreeBucket(adjacency[v].length);
+      if (!buckets[bucketKey]) {
+        buckets[bucketKey] = {
+          vertices: 0,
+          degreeSum: 0,
+          avgIncidentLengthSum: 0,
+          avgIncidentLogLengthSum: 0,
+          maxIncidentLengthSum: 0,
+          maxIncidentLength: 0
+        };
+      }
+      var bucket = buckets[bucketKey];
+      bucket.vertices++;
+      bucket.degreeSum += adjacency[v].length;
+      bucket.avgIncidentLengthSum += sum / incident.length;
+      bucket.avgIncidentLogLengthSum += logSum / incident.length;
+      bucket.maxIncidentLengthSum += vertexMax;
+      if (vertexMax > bucket.maxIncidentLength) {
+        bucket.maxIncidentLength = vertexMax;
+      }
+    }
+
+    var orderedBuckets = ['1', '2', '3', '4', '5', '6-8', '9+']
+      .filter(function(key) { return buckets[key]; })
+      .map(function(key) {
+        var bucket = buckets[key];
+        return {
+          bucket: key,
+          vertices: bucket.vertices,
+          averageDegree: bucket.degreeSum / bucket.vertices,
+          avgIncidentLength: bucket.avgIncidentLengthSum / bucket.vertices,
+          avgIncidentLogLength:
+            bucket.avgIncidentLogLengthSum / bucket.vertices,
+          avgMaxIncidentLength:
+            bucket.maxIncidentLengthSum / bucket.vertices,
+          maxIncidentLength: bucket.maxIncidentLength,
+          avgIncidentRelativeLength: graphMedian
+            ? (bucket.avgIncidentLengthSum / bucket.vertices) / graphMedian
+            : 0,
+          maxIncidentRelativeLength: graphMedian
+            ? bucket.maxIncidentLength / graphMedian : 0
+        };
+      });
+
+    return {
+      edgeCount: lengths.length,
+      medianLength: graphMedian,
+      averageLength: lengths.length ? totalLength / lengths.length : 0,
+      averageLogLength: lengths.length ? totalLogLength / lengths.length : 0,
+      vertexAverageIncidentLogLength: verticesWithIncidentEdges
+        ? vertexAvgIncidentLogLengthSum / verticesWithIncidentEdges : 0,
+      maxLength: maxLength,
+      maxRelativeLength: graphMedian ? maxLength / graphMedian : 0,
+      buckets: orderedBuckets
+    };
+  }
+
+  function stage1Rollout(graph, maxSteps) {
+    var state = {};
+    var moves = [];
+    for (var step = 0; step < maxSteps; step++) {
+      var move = findAdaptiveMinimizeMove(graph, state, {
+        mainListLimit: 18,
+        randomSamples: 0,
+        theta: 0
+      });
+      if (!move || move.improvement <= 0) break;
+      move.node[0] = move.toX;
+      move.node[1] = move.toY;
+      var crossingsAfter = intersections(graph.links);
+      moves.push({
+        vertex: move.nodeIndex,
+        strategy: move.strategy,
+        improvement: move.improvement,
+        crossingsAfter: crossingsAfter
+      });
+    }
+    return {
+      moves: moves,
+      finalCrossings: intersections(graph.links),
+      lastAttempt: state.lastMinimizeAttempt || null
+    };
+  }
+
+  function stage1Probe(graph) {
+    var state = {};
+    var move = findAdaptiveMinimizeMove(graph, state, {
+      mainListLimit: 18,
+      randomSamples: 0,
+      theta: 0
+    });
+    return {
+      found: !!move,
+      bestImprovement: state.lastMinimizeAttempt
+        ? state.lastMinimizeAttempt.bestImprovement : 0,
+      positionsTested: state.lastMinimizeAttempt
+        ? state.lastMinimizeAttempt.positionsTested : 0,
+      vertex: move ? move.nodeIndex : null,
+      strategy: move ? move.strategy : null
+    };
+  }
+
+  // Stage 1c diagnostic: try a tiny grouped reset, then ask whether ordinary
+  // Stage 1 descent becomes productive again. This is intentionally not called
+  // by solverStep yet; Interactive uses it as an inspect/apply tool.
+  function suggestStage1cResetPlan(graph, options) {
+    options = options || {};
+    var started = Date.now();
+    var timeBudgetMs = options.timeBudgetMs || 300;
+    var maxGroupSize = options.maxGroupSize || 4;
+    var minGroupSize = options.minGroupSize || 1;
+    var seedLimit = options.seedLimit === undefined ? 14 : options.seedLimit;
+    var geometricSeedLimit = options.geometricSeedLimit === undefined
+      ? 28 : options.geometricSeedLimit;
+    var cleanupSteps = options.cleanupSteps || 25;
+    var baseCrossings = intersections(graph.links);
+    var beforeProbe = stage1Probe(cloneGraph(graph));
+    var crossingCounts = getCrossingCounts(graph);
+    var ranked = [];
+
+    for (var i = 0; i < graph.nodes.length; i++) {
+      if (crossingCounts[i] <= 0) continue;
+      var degree = getNodeEdges(graph, graph.nodes[i]).length;
+      ranked.push({
+        index: i,
+        crossings: crossingCounts[i],
+        degree: degree,
+        score: crossingCounts[i] * 2 + crossingCounts[i] / Math.max(1, degree)
+      });
+    }
+    ranked.sort(function(a, b) {
+      return b.score - a.score || a.degree - b.degree;
+    });
+
+    var candidatesGenerated = 0;
+    var candidatesTested = 0;
+    var timedOut = false;
+    var best = null;
+    var candidates = [];
+    var scales = options.scales || [0.45, 0.65, 0.85, 1.0];
+    var targetBlends = options.targetBlends || [0.5, 0.8, 1.0, 1.2];
+    var minAcceptNetGain = options.minAcceptNetGain === undefined
+      ? 1 : options.minAcceptNetGain;
+    var maxImmediateDamage = options.maxImmediateDamage;
+    var testedGroups = {};
+
+    function evaluatePositions(group, positions, reason) {
+      if (!positions || Date.now() - started > timeBudgetMs) {
+        timedOut = true;
+        return;
+      }
+      candidatesTested++;
+      var simulation = cloneGraph(graph);
+      applyGroupPositions(simulation, positions);
+      var immediateCrossings = intersections(simulation.links);
+      var immediateDamage = immediateCrossings - baseCrossings;
+      if (maxImmediateDamage !== undefined &&
+          immediateDamage > maxImmediateDamage) {
+        return;
+      }
+      var lengthProfile = lengthDeltaProfile(graph, simulation, group);
+      var afterProbe = stage1Probe(cloneGraph(simulation));
+      if (!afterProbe.found && afterProbe.bestImprovement <= 0) return;
+
+      var rollout = stage1Rollout(simulation, cleanupSteps);
+      var finalCrossings = rollout.finalCrossings;
+      var netGain = baseCrossings - finalCrossings;
+      var recoveryGain = immediateCrossings - finalCrossings;
+      var score = netGain * 12 + recoveryGain +
+        afterProbe.bestImprovement * 4 -
+        Math.max(0, immediateDamage) * 0.35 -
+        group.length * 2 -
+        Math.max(0, lengthProfile.maxDeltaPct) * 80 -
+        Math.max(0, lengthProfile.averageDeltaPct) * 45 +
+        Math.min(0.6, Math.max(0, -lengthProfile.maxDeltaPct)) * 35 +
+        Math.min(0.5, Math.max(0, -lengthProfile.averageDeltaPct)) * 20;
+      if (netGain <= 0 && recoveryGain < Math.max(10, immediateDamage * 0.5)) {
+        score -= 1000;
+      }
+
+      var candidate = {
+          strategy: 'stage1c-group-reset',
+          reason: reason,
+          group: group.slice(),
+          scheduledMoves: positions.map(function(position) {
+            return {
+              index: position.index,
+              x: position.x,
+              y: position.y,
+              mode: 'group-reset'
+            };
+          }),
+          baseCrossings: baseCrossings,
+          immediateCrossings: immediateCrossings,
+          immediateDamage: immediateDamage,
+          finalCrossings: finalCrossings,
+          netGain: netGain,
+          recoveryGain: recoveryGain,
+          rolloutMoves: rollout.moves.length,
+          rollout: rollout.moves.slice(0, 12),
+          beforeProbe: beforeProbe,
+          afterProbe: afterProbe,
+          lengthProfile: lengthProfile,
+          score: score,
+          accepted: netGain >= minAcceptNetGain
+        };
+      candidates.push(candidate);
+      candidates.sort(function(a, b) {
+        return b.score - a.score;
+      });
+      if (candidates.length > (options.keepCandidates || 10)) {
+        candidates.length = options.keepCandidates || 10;
+      }
+
+      if (candidate.accepted && (!best || score > best.score)) {
+        best = candidate;
+      }
+    }
+
+    function evaluateGroup(group, reason) {
+      if (group.length < minGroupSize) return;
+      group = uniqueGroup(group, maxGroupSize);
+      if (group.length < minGroupSize) return;
+      var key = groupKey(group);
+      if (testedGroups[key]) return;
+      testedGroups[key] = true;
+
+      var anchor = externalAnchorCentroidForGroup(graph, group);
+      if (!anchor) return;
+      var groupCenter = centroid(group.map(function(index) {
+        return graph.nodes[index];
+      }));
+      for (var b = 0; b < targetBlends.length; b++) {
+        var blend = targetBlends[b];
+        var target = [
+          groupCenter[0] + (anchor[0] - groupCenter[0]) * blend,
+          groupCenter[1] + (anchor[1] - groupCenter[1]) * blend
+        ];
+        for (var s = 0; s < scales.length; s++) {
+          candidatesGenerated++;
+          evaluatePositions(group,
+            groupResetPositions(graph, group, target, scales[s]),
+            reason);
+          if (timedOut) break;
+        }
+        if (timedOut) break;
+      }
+    }
+
+    for (var r = 0; r < Math.min(seedLimit, ranked.length); r++) {
+      if (Date.now() - started > timeBudgetMs) {
+        timedOut = true;
+        break;
+      }
+      var seed = ranked[r];
+      var neighborItems = getNeighbors(graph, graph.nodes[seed.index]).map(function(node) {
+        var index = graph.nodes.indexOf(node);
+        return {
+          index: index,
+          crossings: crossingCounts[index] || 0,
+          degree: getNodeEdges(graph, node).length
+        };
+      }).filter(function(item) {
+        return item.index >= 0 && item.index !== seed.index;
+      }).sort(function(a, b) {
+        return b.crossings - a.crossings || a.degree - b.degree;
+      });
+
+      var baseGroup = uniqueGroup([seed.index].concat(
+        neighborItems.map(function(item) { return item.index; })), maxGroupSize);
+      for (var size = minGroupSize; size <= baseGroup.length; size++) {
+        evaluateGroup(baseGroup.slice(0, size),
+          'move graph-neighbor group toward external-anchor centroid');
+        if (timedOut) break;
+      }
+    }
+
+    for (var gr = 0; gr < Math.min(geometricSeedLimit, ranked.length); gr++) {
+      if (timedOut || Date.now() - started > timeBudgetMs) {
+        timedOut = true;
+        break;
+      }
+      var geometricSeed = ranked[gr];
+      var nearby = ranked.filter(function(item) {
+        return item.index !== geometricSeed.index;
+      }).map(function(item) {
+        return {
+          index: item.index,
+          distance: pointDistance(
+            graph.nodes[geometricSeed.index], graph.nodes[item.index]),
+          crossings: item.crossings,
+          degree: item.degree
+        };
+      }).sort(function(a, b) {
+        return a.distance - b.distance ||
+          b.crossings - a.crossings || a.degree - b.degree;
+      });
+
+      var nearest = nearby.map(function(item) { return item.index; });
+      for (var gsize = minGroupSize; gsize <= maxGroupSize; gsize++) {
+        evaluateGroup([geometricSeed.index].concat(nearest.slice(0, gsize - 1)),
+          'move geometric crossing clump toward external-anchor centroid');
+        if (timedOut) break;
+      }
+
+      // Try a tight core plus one slightly farther companion. This catches
+      // player-visible "hanging group" cases where three vertices are almost
+      // coincident and the fourth is an outlying member of the same patch.
+      if (!timedOut && maxGroupSize >= 4 && nearest.length >= 5) {
+        for (var out = 3; out < Math.min(8, nearest.length); out++) {
+          evaluateGroup([geometricSeed.index, nearest[0], nearest[1], nearest[out]],
+            'move tight geometric core plus outlier toward external anchors');
+          if (timedOut) break;
+        }
+      }
+    }
+
+    return {
+      baseCrossings: baseCrossings,
+      beforeProbe: beforeProbe,
+      best: best,
+      candidates: candidates,
+      candidatesGenerated: candidatesGenerated,
+      candidatesTested: candidatesTested,
+      elapsedMs: Date.now() - started,
+      timeBudgetMs: timeBudgetMs,
+      timedOut: timedOut,
+      seedVertices: ranked.slice(0, seedLimit).map(function(item) {
+        return {
+          vertex: item.index,
+          crossings: item.crossings,
+          degree: item.degree,
+          score: item.score
+        };
+      })
+    };
   }
 
   // Stage 1b: low-degree "sore thumb" vertices often sit on the wrong side of
@@ -5730,6 +6690,109 @@
       return { done: false, wouldEscape: true, count: count, stuckCount: state.stuckCount };
     }
 
+    // Stage 1c auto hook, currently conservative and small-graph-only. This
+    // fires at the same boundary where Interactive users were manually making
+    // reset moves: ordinary descent is exhausted, but before escape churn.
+    if (!state.activeStructuralPlan &&
+        graph.nodes.length <= 25 &&
+        count <= 60 &&
+        state.stage1cAttemptedAtCount !== count) {
+      state.stage1cAttemptedAtCount = count;
+      var stage1cReport = profileSection('stage1c-reset-search', function() {
+        return suggestStage1cResetPlan(graph, {
+          timeBudgetMs: 350,
+          seedLimit: 0,
+          geometricSeedLimit: 32,
+          minGroupSize: 2,
+          maxGroupSize: 4,
+          scales: [0.75, 1.0],
+          targetBlends: [1.0, 1.2],
+          maxImmediateDamage: 90,
+          cleanupSteps: 25
+        });
+      });
+      state.lastStage1cSearch = stage1cReport;
+      if (stage1cReport.best &&
+          (stage1cReport.best.finalCrossings === 0 ||
+           stage1cReport.best.netGain >= Math.max(1, Math.ceil(count * 0.1)))) {
+        var reset = stage1cReport.best;
+        beginStructuralPlan(state, {
+          type: 'stage1c-reset',
+          objective: reset.reason,
+          startedAtCrossings: count,
+          projectedFinalCrossings: reset.finalCrossings,
+          movableVertices: reset.group,
+          protectedVertices: [],
+          completionCondition: 'stage1c-handoff',
+          maxSteps: reset.scheduledMoves.length + reset.rolloutMoves + 3,
+          baseMetrics: {
+            crossings: count
+          },
+          projectedMetrics: {
+            immediateCrossings: reset.immediateCrossings,
+            finalCrossings: reset.finalCrossings,
+            netGain: reset.netGain,
+            recoveryGain: reset.recoveryGain
+          }
+        });
+        state.pendingStructuralMoves = reset.scheduledMoves.map(function(move) {
+          return {
+            index: move.index,
+            x: move.x,
+            y: move.y,
+            mode: move.mode
+          };
+        });
+        state.pendingStructuralReason = reset.reason;
+        best = takePendingStructuralMove(graph, state);
+        best.search.stage1cReset = {
+          group: reset.group,
+          immediateCrossings: reset.immediateCrossings,
+          immediateDamage: reset.immediateDamage,
+          projectedFinalCrossings: reset.finalCrossings,
+          netGain: reset.netGain,
+          recoveryGain: reset.recoveryGain,
+          rolloutMoves: reset.rolloutMoves,
+          afterProbe: reset.afterProbe,
+          lengthProfile: reset.lengthProfile,
+          candidatesTested: stage1cReport.candidatesTested,
+          elapsedMs: stage1cReport.elapsedMs
+        };
+        best.node[0] = best.toX;
+        best.node[1] = best.toY;
+        recordMove(state, best.nodeIndex, best.toX, best.toY);
+        var newCount = intersections(graph.links);
+        best.improvement = count - newCount;
+        state.stuckCount = 0;
+        state.recentAttempts = {};
+        state.finisherAttemptedAtCount = null;
+        return {
+          done: false,
+          improved: newCount < count,
+          move: attachStructuralPlan(state, best),
+          count: newCount
+        };
+      }
+    }
+
+    // Diagnostic only for now: when the normal stack has run out of ideas,
+    // look for a single problem-child vertex that wants a topological side
+    // change around one of its reference neighbors. Solver exports include
+    // this report, but automatic policy does not execute it yet.
+    if (count <= 20 && state.problemChildInversionAttemptedAtCount !== count) {
+      state.problemChildInversionAttemptedAtCount = count;
+      state.lastProblemChildInversionSearch =
+        profileSection('problem-child-inversion-search', function() {
+          return suggestProblemChildInversions(graph, {
+            timeBudgetMs: 140,
+            vertexLimit: 10,
+            candidateLimit: 220,
+            rolloutLimit: 10,
+            rolloutSteps: 12
+          });
+        });
+    }
+
     // Try escape move
     var escape = profileSection('escape', function() {
       return findEscapeMove(graph);
@@ -6308,6 +7371,8 @@
   exports.suggestRegionCompactionPlan = suggestRegionCompactionPlan;
   exports.suggestRegionExtensionPlan = suggestRegionExtensionPlan;
   exports.suggestDominantBarrierTransfer = suggestDominantBarrierTransfer;
+  exports.suggestAnchorBreakBarrierTransfer = suggestAnchorBreakBarrierTransfer;
+  exports.suggestProblemChildInversions = suggestProblemChildInversions;
   exports.findSeparatingTriangles = findSeparatingTriangles;
   exports.suggestContainedTriangleSolve = suggestContainedTriangleSolve;
   exports.suggestStage2Move = suggestStage2Move;
@@ -6317,6 +7382,7 @@
     findSeparatingTriangleFinisherLookahead;
   exports.suggestStage2Restart = suggestStage2Restart;
   exports.applyStage2Suggestion = applyStage2Suggestion;
+  exports.suggestStage1cResetPlan = suggestStage1cResetPlan;
   exports.findAdaptiveMinimizeMove = findAdaptiveMinimizeMove;
   exports.findReducingSideFlipMove = findReducingSideFlipMove;
   exports.minimizeStep = minimizeStep;

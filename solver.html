@@ -40,6 +40,21 @@
       overflow: hidden;
       display: flex;
       flex-direction: column;
+      border: 4px solid #333;
+      outline: 2px solid transparent;
+    }
+    .puzzle.selected {
+      outline: 4px solid #66ccff;
+    }
+    .puzzle.solved {
+      border-color: #00e060;
+      outline-color: #00e060;
+      box-shadow: 0 0 12px rgba(0, 224, 96, 0.85);
+    }
+    .puzzle.stuck {
+      border-color: #ff3030;
+      outline-color: #ff3030;
+      box-shadow: 0 0 12px rgba(255, 48, 48, 0.85);
     }
     .puzzle svg {
       flex: 1;
@@ -56,15 +71,30 @@
     }
     .puzzle-header.solved { background: #060; }
     .puzzle-header.stuck { background: #600; }
+    .puzzle-actions {
+      background: #222;
+      display: flex;
+      gap: 4px;
+      padding: 4px;
+    }
+    .puzzle-actions button {
+      flex: 1;
+      font-size: 10px;
+      padding: 3px 4px;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
   <div class="controls">
     <label>Nodes: <input type="number" id="num-nodes" value="30" min="10" max="100" style="width:50px"></label>
     <label>Speed: <input type="range" id="speed" min="1" max="100" value="70" style="width:100px"></label>
+    <label><input type="checkbox" id="auto-add" checked> Auto-add replacements</label>
     <button id="start-btn">Start</button>
     <button id="add-btn">+6 More</button>
     <button id="reset-btn">Clear All</button>
+    <button id="export-btn">Export All</button>
+    <button id="export-replay-btn">Export Last Clicked Replay</button>
     <span id="status" style="margin-left: 20px;"></span>
   </div>
   <div class="grid" id="grid"></div>
@@ -85,19 +115,99 @@
     var planarGraph = Solver.planarGraph;
     var scramble = Solver.scramble;
     var solverStepCore = Solver.solverStep;
+    var analyzeGraphState = Solver.analyzeGraphState;
     
     var puzzles = [];
     var running = false;
     var stats = { solved: 0, stuck: 0, totalMoves: 0 };
+    var lastClickedPuzzle = null;
+
+    function graphPositions(graph) {
+      return graph.nodes.map(function(node) {
+        return [node[0], node[1]];
+      });
+    }
+
+    function graphEdges(graph) {
+      return graph.links.map(function(link) {
+        return [
+          graph.nodes.indexOf(link[0]),
+          graph.nodes.indexOf(link[1])
+        ];
+      });
+    }
+
+    function strategyCounts(history) {
+      var strats = {};
+      history.forEach(function(h) {
+        var strategy = h.strategy || h.src || '-';
+        strats[strategy] = (strats[strategy] || 0) + 1;
+      });
+      return strats;
+    }
+
+    function snapshotPuzzle(puzzle, label, result) {
+      return {
+        moveNumber: puzzle.moves,
+        label: label,
+        positions: graphPositions(puzzle.graph),
+        crossings: puzzle.count,
+        strategy: puzzle.lastStrategy,
+        movingNode: result && result.move ? result.move.nodeIndex : null,
+        moveRecord: result && result.move ? {
+          source: 'solver',
+          strategy: result.move.strategy,
+          vertex: result.move.nodeIndex,
+          number: puzzle.moves,
+          from: [result.move.fromX, result.move.fromY],
+          to: [result.move.toX, result.move.toY],
+          crossingsAfter: puzzle.count,
+          improvement: result.move.improvement,
+          rationale: result.move.search || null
+        } : null
+      };
+    }
+
+    function downloadJson(filename, payload, automatic) {
+      var contents = JSON.stringify(payload, null, 2);
+      if (fs) {
+        fs.writeFileSync(filename, contents);
+        if (!automatic) {
+          document.getElementById('status').textContent += ' | Wrote ' + filename;
+        }
+        return;
+      }
+      if (automatic) return;
+      var blob = new Blob([contents], { type: 'application/json' });
+      var link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
+    function selectPuzzle(puzzle) {
+      lastClickedPuzzle = puzzle;
+      window.lastPuzzleHistory = puzzle.history;
+      window.lastPuzzle = puzzle;
+      puzzles.forEach(function(p) {
+        if (p.container) {
+          p.container.classList.toggle('selected', p === puzzle);
+        }
+      });
+      document.getElementById('status').textContent =
+        'Selected graph #' + puzzle.id + ' | ' + puzzle.status +
+        ' | ' + puzzle.count + ' crossings | ' + puzzle.moves + ' moves';
+    }
+
+    function maybeAddReplacement() {
+      var checkbox = document.getElementById('auto-add');
+      if (!checkbox || checkbox.checked) addPuzzleBatch(1);
+    }
     
     // Log solved puzzle summary
     function logSolvedPuzzle(puzzle) {
       if (!fs) return;
-      
-      var strats = {};
-      puzzle.history.forEach(function(h) {
-        strats[h.src] = (strats[h.src] || 0) + 1;
-      });
       
       var entry = {
         id: puzzle.id,
@@ -105,7 +215,7 @@
         timestamp: new Date().toISOString(),
         initialCrossings: puzzle.initialCrossings,
         moves: puzzle.moves,
-        strategies: strats
+        strategies: strategyCounts(puzzle.history)
       };
       
       try {
@@ -117,25 +227,20 @@
     function logStuckPuzzle(puzzle) {
       if (!fs) return;
       
-      var strats = {};
-      puzzle.history.forEach(function(h) {
-        strats[h.src] = (strats[h.src] || 0) + 1;
-      });
-      
       var entry = {
         id: puzzle.id,
         timestamp: new Date().toISOString(),
         initialCrossings: puzzle.initialCrossings,
         finalCrossings: puzzle.count,
         moves: puzzle.moves,
-        strategies: strats,
+        strategies: strategyCounts(puzzle.history),
+        finalDiagnostics: analyzeGraphState
+          ? analyzeGraphState(puzzle.graph, puzzle.solverState || {}) : null,
         lastMoves: puzzle.history.slice(-30),
         // Save graph state for potential export to interactive
         graph: {
-          nodes: puzzle.graph.nodes.map(function(n) { return [n[0], n[1]]; }),
-          edges: puzzle.graph.links.map(function(l) {
-            return [puzzle.graph.nodes.indexOf(l[0]), puzzle.graph.nodes.indexOf(l[1])];
-          })
+          nodes: graphPositions(puzzle.graph),
+          edges: graphEdges(puzzle.graph)
         }
       };
       
@@ -189,7 +294,30 @@
       });
       
       puzzle.header.className = 'puzzle-header' + (puzzle.status === 'solved' ? ' solved' : (puzzle.status === 'stuck' ? ' stuck' : ''));
+      puzzle.container.className = 'puzzle' +
+        (puzzle.status === 'solved' ? ' solved' :
+          (puzzle.status === 'stuck' ? ' stuck' : '')) +
+        (puzzle === lastClickedPuzzle ? ' selected' : '');
+      if (puzzle.status === 'solved') {
+        puzzle.container.style.border = '6px solid #00ff66';
+        puzzle.container.style.outline = '3px solid #00ff66';
+        puzzle.container.style.boxShadow = '0 0 18px rgba(0, 255, 102, 1)';
+      } else if (puzzle.status === 'stuck') {
+        puzzle.container.style.border = '6px solid #ff3030';
+        puzzle.container.style.outline = '3px solid #ff3030';
+        puzzle.container.style.boxShadow = '0 0 18px rgba(255, 48, 48, 1)';
+      } else {
+        puzzle.container.style.border = '4px solid #333';
+        puzzle.container.style.outline = '2px solid transparent';
+        puzzle.container.style.boxShadow = 'none';
+      }
+      if (puzzle === lastClickedPuzzle) {
+        puzzle.container.style.outline = '4px solid #66ccff';
+      }
       var statusInfo = puzzle.count + ' crossings | ' + puzzle.moves + ' moves';
+      if (puzzle.status === 'solved') {
+        statusInfo += ' (SOLVED)';
+      }
       if (puzzle.status === 'stuck') {
         statusInfo += ' (STUCK @ ' + puzzle.count + ')';
       }
@@ -206,8 +334,9 @@
         if (!puzzle.counted) { 
           stats.solved++; 
           puzzle.counted = true;
-          addPuzzleBatch(1);
+          maybeAddReplacement();
         }
+        renderPuzzle(puzzle);
         callback(false);
         return;
       }
@@ -222,7 +351,7 @@
         if (!puzzle.counted) { 
           stats.solved++; 
           puzzle.counted = true;
-          addPuzzleBatch(1);
+          maybeAddReplacement();
           
           // Log solved puzzle summary
           logSolvedPuzzle(puzzle);
@@ -237,7 +366,7 @@
         if (!puzzle.counted) { 
           stats.stuck++; 
           puzzle.counted = true;
-          addPuzzleBatch(1);
+          maybeAddReplacement();
           
           // Log stuck puzzle to file for analysis
           logStuckPuzzle(puzzle);
@@ -255,12 +384,24 @@
         
         // Log move to history
         puzzle.history = puzzle.history || [];
-        puzzle.history.push({
+        var moveEntry = {
           n: puzzle.moves,
           v: result.move.nodeIndex,
           x: puzzle.count,
-          src: result.move.strategy
-        });
+          src: result.move.strategy,
+          move: puzzle.moves,
+          vertex: result.move.nodeIndex,
+          strategy: result.move.strategy,
+          crossings: puzzle.count,
+          positions: graphPositions(puzzle.graph),
+          structuralPlan: result.move.search && result.move.search.structuralPlan || null,
+          search: result.move.search || null,
+          from: [result.move.fromX, result.move.fromY],
+          to: [result.move.toX, result.move.toY],
+          improvement: result.move.improvement
+        };
+        puzzle.history.push(moveEntry);
+        puzzle.snapshots.push(snapshotPuzzle(puzzle, 'move', result));
         
         renderPuzzle(puzzle);
         // Keep running as long as we made a move (escape moves may not "improve" but should continue)
@@ -293,6 +434,19 @@
         var header = document.createElement('div');
         header.className = 'puzzle-header';
         div.appendChild(header);
+
+        var actions = document.createElement('div');
+        actions.className = 'puzzle-actions';
+        var selectBtn = document.createElement('button');
+        selectBtn.textContent = 'Select';
+        var replayBtn = document.createElement('button');
+        replayBtn.textContent = 'Replay';
+        var jsonBtn = document.createElement('button');
+        jsonBtn.textContent = 'JSON';
+        actions.appendChild(selectBtn);
+        actions.appendChild(replayBtn);
+        actions.appendChild(jsonBtn);
+        div.appendChild(actions);
         
         var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         svg.setAttribute('viewBox', '0 0 400 300');
@@ -313,15 +467,19 @@
           lastStrategy: null,
           stuckCount: 0,
           counted: false,
-          history: []
+          history: [],
+          snapshots: []
         };
         puzzles.push(puzzle);
         puzzle.count = intersections(puzzle.graph.links);
         puzzle.initialCrossings = puzzle.count;
+        puzzle.edges = graphEdges(puzzle.graph);
+        puzzle.snapshots.push(snapshotPuzzle(puzzle, 'initial', null));
         
         // Click to show history (use IIFE to capture puzzle correctly)
         (function(p) {
           div.addEventListener('click', function() {
+            selectPuzzle(p);
             console.log('=== Puzzle #' + p.id + ' ===');
             console.log('Status:', p.status);
             console.log('Initial crossings:', p.initialCrossings);
@@ -339,9 +497,21 @@
             });
             console.log('Strategy breakdown:', strats);
             // Make history available globally for analysis
-            window.lastPuzzleHistory = p.history;
-            window.lastPuzzle = p;
             console.log('Full history in window.lastPuzzleHistory, puzzle in window.lastPuzzle');
+          });
+          selectBtn.addEventListener('click', function(event) {
+            event.stopPropagation();
+            selectPuzzle(p);
+          });
+          replayBtn.addEventListener('click', function(event) {
+            event.stopPropagation();
+            selectPuzzle(p);
+            exportPuzzleReplay(p);
+          });
+          jsonBtn.addEventListener('click', function(event) {
+            event.stopPropagation();
+            selectPuzzle(p);
+            exportPuzzleJson(p);
           });
         })(puzzle);
         
@@ -389,40 +559,93 @@
     // Dump all puzzles to file when stopped
     function dumpAllPuzzles() {
       if (!fs) return;
-      
-      var report = {
+      downloadJson('dashboard-dump.json', buildExportReport(), true);
+      console.log('Dumped all puzzle info to dashboard-dump.json');
+    }
+
+    function puzzleExportSummary(p) {
+      return {
+        id: p.id,
+        status: p.status,
+        initialCrossings: p.initialCrossings,
+        finalCrossings: p.count,
+        moves: p.moves,
+        strategies: strategyCounts(p.history),
+        edges: p.edges || graphEdges(p.graph),
+        initialSnapshot: p.snapshots[0] || null,
+        finalSnapshot: snapshotPuzzle(p, 'final-' + p.status, null),
+        finalDiagnostics: analyzeGraphState
+          ? analyzeGraphState(p.graph, p.solverState || {}) : null,
+        snapshots: p.snapshots,
+        history: p.history
+      };
+    }
+
+    function buildExportReport() {
+      return {
+        schemaVersion: 1,
         timestamp: new Date().toISOString(),
+        session: 'solver-dashboard',
         stats: stats,
-        puzzles: puzzles.map(function(p) {
-          var strats = {};
-          p.history.forEach(function(h) {
-            strats[h.src] = (strats[h.src] || 0) + 1;
-          });
-          
+        puzzles: puzzles.map(puzzleExportSummary)
+      };
+    }
+
+    function buildInteractiveReplay(puzzle) {
+      var replaySnapshots = puzzle.snapshots.slice();
+      replaySnapshots.push(snapshotPuzzle(puzzle, 'final-' + puzzle.status, null));
+
+      return {
+        schemaVersion: 2,
+        timestamp: new Date().toISOString(),
+        session: 'solver-' + puzzle.id,
+        nodes: graphPositions(puzzle.graph),
+        edges: puzzle.edges || graphEdges(puzzle.graph),
+        currentPosition: Math.max(0, replaySnapshots.length - 1),
+        moves: puzzle.moves,
+        selectedVertex: -1,
+        crossings: puzzle.count,
+        history: replaySnapshots.map(function(item) {
           return {
-            id: p.id,
-            status: p.status,
-            initialCrossings: p.initialCrossings,
-            finalCrossings: p.count,
-            moves: p.moves,
-            strategies: strats,
-            lastMoves: p.history.slice(-20),
-            graph: {
-              nodes: p.graph.nodes.map(function(n) { return [n[0], n[1]]; }),
-              edges: p.graph.links.map(function(l) {
-                return [p.graph.nodes.indexOf(l[0]), p.graph.nodes.indexOf(l[1])];
-              })
+            positions: item.positions,
+            crossings: item.crossings,
+            strategy: item.strategy || item.label,
+            movingNode: item.movingNode,
+            move: item.moveRecord || {
+              source: 'solver',
+              strategy: item.label,
+              vertex: item.movingNode,
+              number: item.moveNumber
             }
           };
         })
       };
-      
-      try {
-        fs.writeFileSync('dashboard-dump.json', JSON.stringify(report, null, 2));
-        console.log('Dumped all puzzle info to dashboard-dump.json');
-      } catch(e) {
-        console.error('Failed to dump puzzles:', e);
+    }
+
+    function exportAllPuzzles(automatic) {
+      downloadJson('solver-results.json', buildExportReport(), automatic);
+    }
+
+    function exportPuzzleReplay(puzzle) {
+      downloadJson(
+        'solver-graph-' + puzzle.id + '-replay.json',
+        buildInteractiveReplay(puzzle),
+        false);
+    }
+
+    function exportPuzzleJson(puzzle) {
+      downloadJson(
+        'solver-graph-' + puzzle.id + '.json',
+        puzzleExportSummary(puzzle),
+        false);
+    }
+
+    function exportLastClickedReplay() {
+      if (!lastClickedPuzzle) {
+        document.getElementById('status').textContent += ' | Click a puzzle first';
+        return;
       }
+      exportPuzzleReplay(lastClickedPuzzle);
     }
     
     function start() {
@@ -455,6 +678,10 @@
     document.getElementById('start-btn').addEventListener('click', start);
     document.getElementById('add-btn').addEventListener('click', function() { addPuzzleBatch(6); });
     document.getElementById('reset-btn').addEventListener('click', createPuzzles);
+    document.getElementById('export-btn').addEventListener('click', function() {
+      exportAllPuzzles(false);
+    });
+    document.getElementById('export-replay-btn').addEventListener('click', exportLastClickedReplay);
     
     initRowHeight();
     createPuzzles();

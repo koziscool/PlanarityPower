@@ -25,6 +25,59 @@ uphill, are triggered by one offender de-conflicting itself, propagate as a
 ~9-vertex chain, and the frozen offender set thaws; stuck graphs mostly never
 *start* a cascade. Inside/outside is not the trigger mechanism.
 
+`analyze-wasted-tail.js` scans exported solver/turbosolver/interactive JSON,
+detects first live wasted-tail points using `freeze`, `dwell`, and `trend`, and
+tests current structural tools there without changing the solver. First pass on
+the current Downloads corpus (`turbosolver-results.json` + `solver-results.json`,
+60 histories, 26 wasted-tail graphs, 59 checkpoints):
+
+| tool | useful checkpoints | solves | avg positive payoff |
+|------|--------------------|--------|---------------------|
+| `stage1c-reset` | 50/59 (84.7%) | 3 | 4.2 crossings |
+| `problem-child-inversion` | 38/59 (64.4%) | 4 | 4.2 crossings |
+| `anchor-break-barrier` | 36/59 (61.0%) | 0 | 4.7 crossings |
+
+Interpretation: wasted-tail is a strong deployment gate. `anchor-break-barrier`
+is cheap and sometimes high-payoff, but does not yet close solves by itself in
+this corpus. `problem-child-inversion` is lower-hit-rate but has direct solves.
+`stage1c-reset` is broadest, but many winning candidates accept large temporary
+crossing damage, so it should be deployed with stricter damage/payback gates or
+kept as a second-line wasted-tail intervention.
+
+`anchor-break-barrier` is the first metrics-gated deployment candidate from this
+analysis. The live solver can test it in strong wasted-tail (`dwell`/`freeze` or
+long no-new-low proxy), but the automatic hook is opt-in through
+`state.enableAnchorBreakAuto` / `ENABLE_ANCHOR_BREAK_AUTO=1`. The first broad
+auto hook created churn, so the current experimental gate tests it once per
+graph, only below 25 crossings, and commits only zero-damage candidates with a
+large immediate crossing reduction or a direct solve. Analyzer metric deltas
+still support the idea: positive candidates improved crossings, near-clean
+ratio, clean-edge ratio, largest clean region, and crossings-per-dirty-edge
+immediately. It is not default solver policy until benchmarked solve rate
+improves reliably. On seed `12345`, 50 graphs, 30 vertices, 400 move cap, a
+default run with the hook disabled solved 34/50. Two opt-in runs with the
+tightened gate solved 39/50 and 41/50, with 36 and 28 anchor-break transfer
+moves respectively. That is promising, but not conclusive because solver
+randomness and wall-clock bounded searches still change trajectories between
+runs even when the graph batch is fixed.
+
+Follow-up cascade-trigger mining found that usable solved wasted-tail histories
+usually start their final cascade from an ordinary single-vertex adaptive move,
+not from an already-labeled structural tool. The common event is a large
+`drop`/`thaw` move that breaks the frozen offender set. In response, the solver
+now has an experimental `suggestCascadeTriggerMove()` search: after strong
+wasted-tail evidence (`dwell`, `freeze`, flat/upward `trend`, or long no-new-low
+proxy), it tests a small set of top/persistent offenders and scores candidate
+positions by `drop`, `thaw`, crossing improvement, and short deterministic
+Stage 1 rollout.
+
+Initial automatic deployment was rejected. On seed `12345`, 50 graphs, 30
+vertices, 400 move cap, enabling the hook solved 40/50 with 115.8 average moves
+per solve; disabling it solved 43/50 with 124.6 average moves per solve. The
+hook fired only 11 times but changed enough trajectories to reduce solve rate.
+It remains exported/available for explicit experiments via
+`ENABLE_CASCADE_TRIGGER=1`, but normal solver policy does not call it.
+
 ## Removed Strategies
 
 These implementations were removed from `solver.js` during consolidation because
@@ -511,6 +564,25 @@ from one global RNG stream. That made code-version A/B comparisons noisy:
 any solver change that consumed a different number of random values could
 change every later generated graph. TurboSolver was already safer here because
 it creates all puzzles before `Run` starts solving.
+
+### June 2026 deterministic solver clock
+
+The solver now has an internal deterministic clock (`setDeterministicClock`)
+used by structural-search time budgets. Browser pages expose it as a checkbox in
+`solver.html`, `interactive.html`, and `turbosolver.html`; Node benchmark uses
+the same mechanism for `--deterministic-clock`. UI timestamps, animation timing,
+and profiler timing still use real time. The deterministic clock increments one
+logical millisecond per solver clock read, so candidate searches get reproducible
+budgets independent of browser load or headless/runtime differences.
+
+Current reproducible baseline:
+
+```bash
+node benchmark-stage2.js 50 30 400 12345 --deterministic-clock
+```
+
+Result: `39/50` solved, median solved moves `97`, average solved moves `125.36`.
+This is the apples-to-apples baseline for metric and algorithm comparisons.
 
 ### June 2026 rollback to first-cut perf baseline
 

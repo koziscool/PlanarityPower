@@ -80,6 +80,7 @@
     <label>Churn patience: <input id="churn-patience" type="number" value="75" min="10" max="1000"></label>
     <label>Moves/frame: <input id="moves-frame" type="number" value="10" min="1" max="100"></label>
     <label>Frame delay: <input id="frame-delay" type="number" value="30" min="0" max="1000"> ms</label>
+    <label><input id="deterministic-clock" type="checkbox"> Deterministic solver clock</label>
     <button id="new-btn">New Batch</button>
     <button id="run-btn">Run</button>
     <button id="export-btn">Export Results</button>
@@ -106,6 +107,15 @@
 
     function numberValue(id, fallback) {
       return parseInt(document.getElementById(id).value, 10) || fallback;
+    }
+
+    function applySolverClock(reset) {
+      var checkbox = document.getElementById('deterministic-clock');
+      if (!Solver.setDeterministicClock) return;
+      Solver.setDeterministicClock(checkbox && checkbox.checked, {
+        startMs: reset ? 0 : (Solver.getClockState ? Solver.getClockState().tick : 0),
+        stepMs: 1
+      });
     }
 
     function seededRandom(seed) {
@@ -224,6 +234,7 @@
 
     function createBatch() {
       stop();
+      applySolverClock(true);
       document.getElementById('grid').innerHTML = '';
       puzzles = [];
       startedAt = null;
@@ -325,6 +336,7 @@
 
     function stepPuzzle(puzzle, moveCap, churnPatience) {
       if (puzzle.status !== 'running') return;
+      applySolverClock(false);
       if (puzzle.moves >= moveCap) {
         finishPuzzle(puzzle, 'capped');
         return;
@@ -422,6 +434,7 @@
       if (!puzzles.some(function(puzzle) { return puzzle.status === 'running'; })) {
         createBatch();
       }
+      applySolverClock(true);
       running = true;
       startedAt = startedAt || Date.now();
       document.getElementById('run-btn').textContent = 'Stop';
@@ -461,7 +474,10 @@
           moveCap: numberValue('move-cap', 400),
           churnPatience: numberValue('churn-patience', 75),
           movesPerFrame: numberValue('moves-frame', 10),
-          frameDelayMs: numberValue('frame-delay', 30)
+          frameDelayMs: numberValue('frame-delay', 30),
+          deterministicClock: Boolean(
+            document.getElementById('deterministic-clock') &&
+            document.getElementById('deterministic-clock').checked)
         },
         elapsedMs: startedAt ? Date.now() - startedAt : 0,
         summary: {

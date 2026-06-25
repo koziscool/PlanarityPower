@@ -19,6 +19,33 @@
 
 (function(exports) {
 
+  var deterministicClock = {
+    enabled: false,
+    tick: 0,
+    stepMs: 1
+  };
+
+  function now() {
+    if (!deterministicClock.enabled) return Date.now();
+    deterministicClock.tick += deterministicClock.stepMs;
+    return deterministicClock.tick;
+  }
+
+  function setDeterministicClock(enabled, options) {
+    options = options || {};
+    deterministicClock.enabled = Boolean(enabled);
+    deterministicClock.tick = options.startMs || 0;
+    deterministicClock.stepMs = options.stepMs || 1;
+  }
+
+  function getClockState() {
+    return {
+      deterministic: deterministicClock.enabled,
+      tick: deterministicClock.tick,
+      stepMs: deterministicClock.stepMs
+    };
+  }
+
   var profiler = {
     enabled: false,
     stack: [],
@@ -1463,7 +1490,7 @@
   // rollout estimates whether the cleared space enables region growth.
   function suggestRegionCompactionPlan(graph, options) {
     options = options || {};
-    var startedAt = Date.now();
+    var startedAt = now();
     var timeBudgetMs = options.timeBudgetMs || 600;
     var baseAnalysis = analyzeGraphState(graph, {});
     var region = baseAnalysis.bestEstablishedRegion;
@@ -1473,7 +1500,7 @@
         baseCrossings: baseAnalysis.crossings,
         region: region ? region.vertices : [],
         candidatesTested: 0,
-        elapsedMs: Date.now() - startedAt,
+        elapsedMs: now() - startedAt,
         timedOut: false,
         best: null,
         candidates: []
@@ -1498,18 +1525,18 @@
     var tested = 0;
 
     for (var di = 0; di < directions.length &&
-        Date.now() - startedAt < timeBudgetMs; di++) {
+        now() - startedAt < timeBudgetMs; di++) {
       var direction = directions[di];
       var directionDistances = di === 0 ? [0] : distances;
       for (var distanceIndex = 0; distanceIndex < directionDistances.length &&
-          Date.now() - startedAt < timeBudgetMs; distanceIndex++) {
+          now() - startedAt < timeBudgetMs; distanceIndex++) {
         var distance = directionDistances[distanceIndex];
         var center = [
           bounds.center[0] + direction[0] * distance,
           bounds.center[1] + direction[1] * distance
         ];
         for (var si = 0; si < scales.length &&
-            Date.now() - startedAt < timeBudgetMs; si++) {
+            now() - startedAt < timeBudgetMs; si++) {
           var positions = compactRegionPositions(
             graph, vertices, center, scales[si]);
           if (!positions) continue;
@@ -1530,7 +1557,7 @@
           var cleanupState = {};
           var cleanupSteps = 0;
           while (cleanupSteps < cleanupLimit &&
-              Date.now() - startedAt < timeBudgetMs) {
+              now() - startedAt < timeBudgetMs) {
             var result = minimizeStep(simulation, cleanupState);
             if (!result.move) break;
             cleanupSteps++;
@@ -1597,8 +1624,8 @@
       region: vertices,
       baseRegionSize: baseGrown.length,
       candidatesTested: tested,
-      elapsedMs: Date.now() - startedAt,
-      timedOut: Date.now() - startedAt >= timeBudgetMs,
+      elapsedMs: now() - startedAt,
+      timedOut: now() - startedAt >= timeBudgetMs,
       best: candidates.length > 0 && candidates[0].accepted
         ? candidates[0] : null,
       candidates: candidates.slice(0, 5)
@@ -1625,7 +1652,7 @@
   // must recover and show clear structural progress before execution.
   function suggestRegionExtensionPlan(graph, options) {
     options = options || {};
-    var startedAt = Date.now();
+    var startedAt = now();
     var timeBudgetMs = options.timeBudgetMs || 100;
     var baseAnalysis = analyzeGraphState(graph, {});
     var base = regionExtensionMetrics(baseAnalysis);
@@ -1641,13 +1668,13 @@
     var tested = 0;
 
     for (var pi = 0; pi < plans.length &&
-        Date.now() - startedAt < timeBudgetMs; pi++) {
+        now() - startedAt < timeBudgetMs; pi++) {
       var plan = plans[pi];
       var vertices = plan.vertices.slice(0, maxGroupSize);
       if (vertices.length < 2) continue;
 
       for (var di = 0; di < distances.length &&
-          Date.now() - startedAt < timeBudgetMs; di++) {
+          now() - startedAt < timeBudgetMs; di++) {
         var positions = translateVertices(
           graph, vertices, plan.direction, distances[di]);
         var simulation = cloneGraph(graph);
@@ -1662,7 +1689,7 @@
         var cleanupState = {};
         var cleanupSteps = 0;
         while (cleanupSteps < cleanupLimit &&
-            Date.now() - startedAt < timeBudgetMs) {
+            now() - startedAt < timeBudgetMs) {
           var result = minimizeStep(simulation, cleanupState);
           if (!result.move) break;
           cleanupSteps++;
@@ -1719,8 +1746,8 @@
       type: 'region-extension-search',
       baseMetrics: base,
       candidatesTested: tested,
-      elapsedMs: Date.now() - startedAt,
-      timedOut: Date.now() - startedAt >= timeBudgetMs,
+      elapsedMs: now() - startedAt,
+      timedOut: now() - startedAt >= timeBudgetMs,
       best: candidates.length > 0 && candidates[0].accepted
         ? candidates[0] : null,
       candidates: candidates.slice(0, 5)
@@ -1784,7 +1811,7 @@
   // and commit only when deterministic cleanup projects a complete solve.
   function suggestDominantBarrierTransfer(graph, options) {
     options = options || {};
-    var startedAt = Date.now();
+    var startedAt = now();
     var timeBudgetMs = options.timeBudgetMs || 140;
     var baseCrossings = intersections(graph.links);
     var cleanupLimit = options.cleanupSteps || 20;
@@ -1827,7 +1854,7 @@
     }
 
     for (var barrierIndex = 0; barrierIndex < edgeCrossings.length &&
-        Date.now() - startedAt < timeBudgetMs; barrierIndex++) {
+        now() - startedAt < timeBudgetMs; barrierIndex++) {
       var barrierInfo = edgeCrossings[barrierIndex];
       var barrier = graph.links[barrierInfo.index];
       var barrierA = graph.nodes.indexOf(barrier[0]);
@@ -1839,7 +1866,7 @@
       var normal = [-edgeDy / edgeLength, edgeDx / edgeLength];
 
       [-1, 1].forEach(function(sideSign) {
-        if (Date.now() - startedAt >= timeBudgetMs) return;
+        if (now() - startedAt >= timeBudgetMs) return;
         var signedDistances = {};
         var component = [];
         graph.nodes.forEach(function(node, index) {
@@ -1880,7 +1907,7 @@
         });
 
         for (var placementIndex = 0; placementIndex < placements.length &&
-            Date.now() - startedAt < timeBudgetMs; placementIndex++) {
+            now() - startedAt < timeBudgetMs; placementIndex++) {
           var placement = placements[placementIndex];
           var anchors = barrierAnchorCompatibility(
             graph, component, placement.direction);
@@ -1893,7 +1920,7 @@
           var cleanupState = {};
           var cleanupSteps = 0;
           while (cleanupSteps < cleanupLimit &&
-              Date.now() - startedAt < timeBudgetMs) {
+              now() - startedAt < timeBudgetMs) {
             var cleanup = findAdaptiveMinimizeMove(simulation, cleanupState, {
               candidateLimit: 8,
               randomSamples: 0,
@@ -1948,8 +1975,8 @@
       baseCrossings: baseCrossings,
       barriersInspected: edgeCrossings.length,
       candidatesTested: tested,
-      elapsedMs: Date.now() - startedAt,
-      timedOut: Date.now() - startedAt >= timeBudgetMs,
+      elapsedMs: now() - startedAt,
+      timedOut: now() - startedAt >= timeBudgetMs,
       best: candidates.length > 0 && candidates[0].accepted
         ? candidates[0] : null,
       candidates: candidates.slice(0, 5)
@@ -2068,7 +2095,7 @@
 
   function suggestAnchorBreakBarrierTransfer(graph, options) {
     options = options || {};
-    var startedAt = Date.now();
+    var startedAt = now();
     var timeBudgetMs = options.timeBudgetMs || 120;
     var componentLimit = options.componentLimit || 8;
     var baseCrossings = intersections(graph.links);
@@ -2098,7 +2125,7 @@
       .slice(0, options.barrierLimit || 4);
 
     for (var bi = 0; bi < barriers.length &&
-        Date.now() - startedAt < timeBudgetMs; bi++) {
+        now() - startedAt < timeBudgetMs; bi++) {
       var barrierIndex = barriers[bi];
       var barrier = graph.links[barrierIndex];
       var barrierA = graph.nodes.indexOf(barrier[0]);
@@ -2107,7 +2134,7 @@
       if (crossingEdges.length === 0) continue;
 
       [-1, 1].forEach(function(sourceSign) {
-        if (Date.now() - startedAt >= timeBudgetMs) return;
+        if (now() - startedAt >= timeBudgetMs) return;
         var seeds = [];
         crossingEdges.forEach(function(edgeIndex) {
           graph.links[edgeIndex].forEach(function(node) {
@@ -2177,8 +2204,8 @@
       type: 'anchor-break-barrier-transfer',
       baseCrossings: baseCrossings,
       candidatesTested: tested,
-      elapsedMs: Date.now() - startedAt,
-      timedOut: Date.now() - startedAt >= timeBudgetMs,
+      elapsedMs: now() - startedAt,
+      timedOut: now() - startedAt >= timeBudgetMs,
       best: candidates.length && candidates[0].accepted ? candidates[0] : null,
       candidates: candidates.slice(0, options.keepCandidates || 8)
     };
@@ -2186,7 +2213,7 @@
 
   function suggestProblemChildInversions(graph, options) {
     options = options || {};
-    var startedAt = Date.now();
+    var startedAt = now();
     var timeBudgetMs = options.timeBudgetMs || 160;
     var candidateLimit = options.candidateLimit || 220;
     var perVertexLimit = options.perVertexLimit || 80;
@@ -2271,7 +2298,7 @@
     var radii = options.radii || [0.04, 0.06, 0.085, 0.115, 0.15];
     for (var ri = 0; ri < ranked.length &&
         tested < candidateLimit &&
-        Date.now() - startedAt < timeBudgetMs; ri++) {
+        now() - startedAt < timeBudgetMs; ri++) {
       var item = ranked[ri];
       var vertexIndex = item.index;
       var node = graph.nodes[vertexIndex];
@@ -2292,7 +2319,7 @@
       for (var ni = 0; ni < neighbors.length &&
           tested < candidateLimit &&
           vertexTested < perVertexLimit &&
-          Date.now() - startedAt < timeBudgetMs; ni++) {
+          now() - startedAt < timeBudgetMs; ni++) {
         var referenceIndex = neighbors[ni];
         var reference = graph.nodes[referenceIndex];
         var directions = [];
@@ -2316,12 +2343,12 @@
         for (var di = 0; di < directions.length &&
             tested < candidateLimit &&
             vertexTested < perVertexLimit &&
-            Date.now() - startedAt < timeBudgetMs; di++) {
+            now() - startedAt < timeBudgetMs; di++) {
           var direction = directions[di];
           for (var si = 0; si < radii.length &&
               tested < candidateLimit &&
               vertexTested < perVertexLimit &&
-              Date.now() - startedAt < timeBudgetMs; si++) {
+              now() - startedAt < timeBudgetMs; si++) {
             var radius = radii[si];
             var toX = Math.max(0.02, Math.min(0.98,
               reference[0] + direction[0] * radius));
@@ -2382,7 +2409,7 @@
       }
     }
 
-    if (Date.now() - startedAt >= timeBudgetMs) timedOut = true;
+    if (now() - startedAt >= timeBudgetMs) timedOut = true;
     candidates.sort(function(a, b) {
       return a.score - b.score ||
         b.vertexCrossings - a.vertexCrossings ||
@@ -2391,7 +2418,7 @@
 
     var rolloutCount = Math.min(rolloutLimit, candidates.length);
     for (var ci = 0; ci < rolloutCount &&
-        Date.now() - startedAt < timeBudgetMs; ci++) {
+        now() - startedAt < timeBudgetMs; ci++) {
       var rolloutCandidate = candidates[ci];
       var rolloutGraph = cloneGraph(graph);
       applyGroupPositions(rolloutGraph, rolloutCandidate.positions);
@@ -2411,7 +2438,7 @@
         rolloutCandidate.cleanDelta * 2 +
         rolloutCandidate.displacement * 4;
     }
-    if (Date.now() - startedAt >= timeBudgetMs) timedOut = true;
+    if (now() - startedAt >= timeBudgetMs) timedOut = true;
 
     candidates.sort(function(a, b) {
       return a.score - b.score ||
@@ -2424,7 +2451,7 @@
       baseCrossings: baseCrossings,
       candidateVertices: ranked.map(function(item) { return item.index; }),
       candidatesTested: tested,
-      elapsedMs: Date.now() - startedAt,
+      elapsedMs: now() - startedAt,
       timeBudgetMs: timeBudgetMs,
       timedOut: timedOut,
       best: candidates.length > 0 && candidates[0].accepted
@@ -2562,6 +2589,8 @@
       lastRegionExtensionSearch: state.lastRegionExtensionSearch || null,
       lastProblemChildInversionSearch:
         state.lastProblemChildInversionSearch || null,
+      lastAnchorBreakBarrierSearch: state.lastAnchorBreakBarrierSearch || null,
+      lastCascadeTriggerSearch: state.lastCascadeTriggerSearch || null,
       lastMinimizeAttempt: state.lastMinimizeAttempt || null,
       lastSideFlipAttempt: state.lastSideFlipAttempt || null,
       sideFlipMoves: state.sideFlipMoves || 0
@@ -2916,7 +2945,7 @@
   // sequence, but execution is accepted only for a projected complete solve.
   function suggestContainedTriangleSolve(graph, options) {
     options = options || {};
-    var startedAt = Date.now();
+    var startedAt = now();
     var timeBudgetMs = options.timeBudgetMs || 140;
     var baseCrossings = intersections(graph.links);
     var componentLimit = options.componentLimit || 10;
@@ -2942,7 +2971,7 @@
     }
 
     for (var triangleIndex = 0; triangleIndex < triangles.length &&
-        Date.now() - startedAt < timeBudgetMs; triangleIndex++) {
+        now() - startedAt < timeBudgetMs; triangleIndex++) {
       var triangle = triangles[triangleIndex];
       if (triangle.boundaryCrossings !== 0) continue;
       var insideComponents = triangle.components.filter(function(component) {
@@ -2952,7 +2981,7 @@
       });
 
       for (var componentIndex = 0; componentIndex < insideComponents.length &&
-          Date.now() - startedAt < timeBudgetMs; componentIndex++) {
+          now() - startedAt < timeBudgetMs; componentIndex++) {
         var component = insideComponents[componentIndex];
         var initialSubgraph = containedSubgraph(
           graph, triangle.vertices, component.vertices);
@@ -2965,7 +2994,7 @@
         var solvedRestart = null;
 
         for (var restart = 0; restart < restartLimit &&
-            Date.now() - startedAt < timeBudgetMs; restart++) {
+            now() - startedAt < timeBudgetMs; restart++) {
           var positions = graph.nodes.map(function(node) {
             return [node[0], node[1]];
           });
@@ -2988,10 +3017,10 @@
           var currentCrossings = intersections(containedSubgraph(
             graph, triangle.vertices, component.vertices, positions).links);
           for (var pass = 0; pass < passLimit && currentCrossings > 0 &&
-              Date.now() - startedAt < timeBudgetMs; pass++) {
+              now() - startedAt < timeBudgetMs; pass++) {
             var improved = false;
             for (var vertexIndex = 0; vertexIndex < component.vertices.length &&
-                Date.now() - startedAt < timeBudgetMs; vertexIndex++) {
+                now() - startedAt < timeBudgetMs; vertexIndex++) {
               var movingVertex = component.vertices[vertexIndex];
               var vertexBest = positions[movingVertex];
               var vertexBestCrossings = currentCrossings;
@@ -3072,8 +3101,8 @@
       baseCrossings: baseCrossings,
       trianglesInspected: triangles.length,
       candidatesTested: tested,
-      elapsedMs: Date.now() - startedAt,
-      timedOut: Date.now() - startedAt >= timeBudgetMs,
+      elapsedMs: now() - startedAt,
+      timedOut: now() - startedAt >= timeBudgetMs,
       best: candidates.length > 0 && candidates[0].accepted
         ? candidates[0] : null,
       candidates: candidates.slice(0, 5)
@@ -3383,7 +3412,7 @@
   // original graph.
   function findSeparatingTriangleFinisherLookahead(graph, options) {
     options = options || {};
-    var startedAt = Date.now();
+    var startedAt = now();
     var timeBudgetMs = options.timeBudgetMs || 90;
     var damageLimit = options.damageLimit === undefined ? 3 : options.damageLimit;
     var baseCrossings = intersections(graph.links);
@@ -3416,7 +3445,7 @@
       var sourceNode = graph.nodes[vertexIndex];
       for (var di = 0; di < directions.length; di++) {
         for (var si = 0; si < distances.length; si++) {
-          if (Date.now() - startedAt >= timeBudgetMs) break;
+          if (now() - startedAt >= timeBudgetMs) break;
           var distance = distances[si];
           var normalizer = directions[di][0] !== 0 && directions[di][1] !== 0
             ? Math.sqrt(2) : 1;
@@ -3484,19 +3513,19 @@
               fromSide: finisher.fromSide,
               toSide: finisher.toSide,
               testedSetups: tested,
-              elapsedMs: Date.now() - startedAt,
+              elapsedMs: now() - startedAt,
               score: score
             };
             if (finisher.finalCrossings === 0 && setupDamage <= 0) return best;
           }
         }
-        if (Date.now() - startedAt >= timeBudgetMs) break;
+        if (now() - startedAt >= timeBudgetMs) break;
       }
-      if (Date.now() - startedAt >= timeBudgetMs) break;
+      if (now() - startedAt >= timeBudgetMs) break;
     }
     if (best) {
       best.testedSetups = tested;
-      best.elapsedMs = Date.now() - startedAt;
+      best.elapsedMs = now() - startedAt;
     }
     return best;
   }
@@ -3654,6 +3683,9 @@
           state.activeStructuralPlan.type === 'dominant-barrier-transfer'
           ? 'stage3-dominant-barrier-transfer' :
         state.activeStructuralPlan &&
+          state.activeStructuralPlan.type === 'anchor-break-barrier-transfer'
+          ? 'stage2-anchor-break-barrier-transfer' :
+        state.activeStructuralPlan &&
           state.activeStructuralPlan.type === 'stage1c-reset'
           ? 'stage1c-reset' : 'stage2-proven-solve',
       search: {
@@ -3697,7 +3729,7 @@
   // structural gain even when the immediate crossing count does not improve.
   function suggestSeparatorReshape(graph, options) {
     options = options || {};
-    var startedAt = Date.now();
+    var startedAt = now();
     var timeBudgetMs = options.timeBudgetMs || 250;
     var baseAnalysis = analyzeGraphState(graph, {});
     var baseCrossings = baseAnalysis.crossings;
@@ -3711,10 +3743,10 @@
     var timedOut = false;
 
     for (var ti = 0; ti < triangles.length && tested < candidateLimit &&
-        Date.now() - startedAt < timeBudgetMs; ti++) {
+        now() - startedAt < timeBudgetMs; ti++) {
       var triangle = triangles[ti];
       for (var ci = 0; ci < triangle.components.length && tested < candidateLimit &&
-          Date.now() - startedAt < timeBudgetMs; ci++) {
+          now() - startedAt < timeBudgetMs; ci++) {
         var component = triangle.components[ci];
         if (component.boundaryCrossings === 0 ||
             component.vertices.length > componentLimit) {
@@ -3736,7 +3768,7 @@
         });
 
         for (var vi = 0; vi < triangle.vertices.length && tested < candidateLimit &&
-            Date.now() - startedAt < timeBudgetMs; vi++) {
+            now() - startedAt < timeBudgetMs; vi++) {
           var vertexIndex = triangle.vertices[vi];
           var otherVertices = triangle.vertices.filter(function(index) {
             return index !== vertexIndex;
@@ -3759,7 +3791,7 @@
             ) * 0.55);
           [1, 1.35, 1.7].forEach(function(scale) {
             if (tested >= candidateLimit ||
-                Date.now() - startedAt >= timeBudgetMs) return;
+                now() - startedAt >= timeBudgetMs) return;
             var toX = Math.max(0.02, Math.min(0.98,
               componentCenter[0] + dx * baseDistance * scale));
             var toY = Math.max(0.02, Math.min(0.98,
@@ -3829,7 +3861,7 @@
         }
       }
     }
-    timedOut = Date.now() - startedAt >= timeBudgetMs;
+    timedOut = now() - startedAt >= timeBudgetMs;
 
     candidates.sort(function(a, b) {
       return b.score - a.score ||
@@ -3841,7 +3873,7 @@
       baseCrossings: baseCrossings,
       trianglesInspected: triangles.length,
       candidatesTested: tested,
-      elapsedMs: Date.now() - startedAt,
+      elapsedMs: now() - startedAt,
       timeBudgetMs: timeBudgetMs,
       timedOut: timedOut,
       best: candidates.length > 0 && candidates[0].score > 0 ? candidates[0] : null,
@@ -3875,7 +3907,7 @@
   // adaptive Stage 1 descent to reach a better local minimum.
   function suggestStage2Restart(graph, options) {
     options = options || {};
-    var startedAt = Date.now();
+    var startedAt = now();
     var timeBudgetMs = options.timeBudgetMs || 75;
     var candidateLimit = options.candidateLimit || 8;
     var vertexLimit = options.vertexLimit || 3;
@@ -4101,7 +4133,7 @@
     }
 
     for (var ci = 0; ci < generated.length; ci++) {
-      if (Date.now() - startedAt >= timeBudgetMs) {
+      if (now() - startedAt >= timeBudgetMs) {
         timedOut = true;
         break;
       }
@@ -4116,11 +4148,11 @@
 
       var simulationState = {};
       var steps = 0;
-      while (steps < simulationSteps && Date.now() - startedAt < timeBudgetMs) {
+      while (steps < simulationSteps && now() - startedAt < timeBudgetMs) {
         if (!deterministicMinimizeStep(simulation, simulationState)) break;
         steps++;
       }
-      if (Date.now() - startedAt >= timeBudgetMs) timedOut = true;
+      if (now() - startedAt >= timeBudgetMs) timedOut = true;
 
       var finalCrossings = intersections(simulation.links);
       var finalClean = simulation.nodes.filter(function(node) { return !node.intersection; }).length;
@@ -4163,7 +4195,7 @@
       }),
       candidatesGenerated: generated.length,
       candidatesTested: tested.length,
-      elapsedMs: Date.now() - startedAt,
+      elapsedMs: now() - startedAt,
       timeBudgetMs: timeBudgetMs,
       timedOut: timedOut,
       best: best,
@@ -5960,7 +5992,7 @@
   // by solverStep yet; Interactive uses it as an inspect/apply tool.
   function suggestStage1cResetPlan(graph, options) {
     options = options || {};
-    var started = Date.now();
+    var started = now();
     var timeBudgetMs = options.timeBudgetMs || 300;
     var maxGroupSize = options.maxGroupSize || 4;
     var minGroupSize = options.minGroupSize || 1;
@@ -6000,7 +6032,7 @@
     var testedGroups = {};
 
     function evaluatePositions(group, positions, reason) {
-      if (!positions || Date.now() - started > timeBudgetMs) {
+      if (!positions || now() - started > timeBudgetMs) {
         timedOut = true;
         return;
       }
@@ -6103,7 +6135,7 @@
     }
 
     for (var r = 0; r < Math.min(seedLimit, ranked.length); r++) {
-      if (Date.now() - started > timeBudgetMs) {
+      if (now() - started > timeBudgetMs) {
         timedOut = true;
         break;
       }
@@ -6131,7 +6163,7 @@
     }
 
     for (var gr = 0; gr < Math.min(geometricSeedLimit, ranked.length); gr++) {
-      if (timedOut || Date.now() - started > timeBudgetMs) {
+      if (timedOut || now() - started > timeBudgetMs) {
         timedOut = true;
         break;
       }
@@ -6177,7 +6209,7 @@
       candidates: candidates,
       candidatesGenerated: candidatesGenerated,
       candidatesTested: candidatesTested,
-      elapsedMs: Date.now() - started,
+      elapsedMs: now() - started,
       timeBudgetMs: timeBudgetMs,
       timedOut: timedOut,
       seedVertices: ranked.slice(0, seedLimit).map(function(item) {
@@ -6189,6 +6221,173 @@
         };
       })
     };
+  }
+
+  function suggestCascadeTriggerMove(graph, state, options) {
+    state = state || {};
+    options = options || {};
+    var started = now();
+    var timeBudgetMs = options.timeBudgetMs || 90;
+    var baseCrossings = intersections(graph.links);
+    if (baseCrossings === 0) return null;
+
+    var beforeCounts = getCrossingCounts(graph);
+    var story = state.storyMetrics || {};
+    var ranked = beforeCounts.map(function(count, index) {
+      return {
+        index: index,
+        crossings: count,
+        streak: state.storyState && state.storyState.streak
+          ? (state.storyState.streak[index] || 0) : 0,
+        score: count * 3 +
+          (story.topOffender === index ? 8 : 0) +
+          (state.storyState && state.storyState.streak
+            ? Math.min(10, state.storyState.streak[index] || 0) * 0.5 : 0)
+      };
+    }).filter(function(item) {
+      return item.crossings > 0 || item.streak >= 8 ||
+        story.topOffender === item.index;
+    }).sort(function(a, b) {
+      return b.score - a.score;
+    }).slice(0, options.vertexLimit || 8);
+
+    var best = null;
+    var tested = 0;
+    var seen = {};
+
+    function addPosition(positions, x, y) {
+      x = Math.max(0.02, Math.min(0.98, x));
+      y = Math.max(0.02, Math.min(0.98, y));
+      var key = x.toFixed(3) + ',' + y.toFixed(3);
+      if (seen[key]) return;
+      seen[key] = true;
+      positions.push([x, y]);
+    }
+
+    for (var ri = 0; ri < ranked.length &&
+        now() - started < timeBudgetMs; ri++) {
+      var item = ranked[ri];
+      var node = graph.nodes[item.index];
+      var positions = [];
+      seen = {};
+      var neighbors = getNeighbors(graph, node);
+      var wc = weightedCentroid(graph, node);
+      if (wc) addPosition(positions, wc[0], wc[1]);
+      if (neighbors.length) {
+        var cx = 0, cy = 0;
+        neighbors.forEach(function(neighbor) {
+          cx += neighbor[0];
+          cy += neighbor[1];
+        });
+        cx /= neighbors.length;
+        cy /= neighbors.length;
+        addPosition(positions, cx, cy);
+        addPosition(positions, (node[0] + cx) / 2, (node[1] + cy) / 2);
+      }
+
+      var radii = [0.07, 0.13, 0.22];
+      for (var sector = 0; sector < 8; sector++) {
+        var angle = Math.PI * 2 * sector / 8;
+        for (var rr = 0; rr < radii.length; rr++) {
+          addPosition(positions,
+            node[0] + Math.cos(angle) * radii[rr],
+            node[1] + Math.sin(angle) * radii[rr]);
+        }
+      }
+      [[0.05, 0.05], [0.95, 0.05], [0.05, 0.95], [0.95, 0.95],
+       [0.5, 0.05], [0.5, 0.95], [0.05, 0.5], [0.95, 0.5]]
+        .forEach(function(pos) {
+          addPosition(positions, pos[0], pos[1]);
+        });
+
+      for (var pi = 0; pi < positions.length &&
+          now() - started < timeBudgetMs; pi++) {
+        var pos = positions[pi];
+        if (isTooClose(graph, node, pos[0], pos[1]) ||
+            wouldOscillate(state, item.index, pos[0], pos[1])) {
+          continue;
+        }
+        tested++;
+
+        var simulation = cloneGraph(graph);
+        simulation.nodes[item.index][0] = pos[0];
+        simulation.nodes[item.index][1] = pos[1];
+        var immediateCrossings = intersections(simulation.links);
+        var afterCounts = getCrossingCounts(simulation);
+        var maxDrop = 0;
+        var thaw = 0;
+        for (var ci = 0; ci < beforeCounts.length; ci++) {
+          var drop = (beforeCounts[ci] || 0) - (afterCounts[ci] || 0);
+          if (drop > maxDrop) maxDrop = drop;
+          if ((beforeCounts[ci] || 0) > 0 && (afterCounts[ci] || 0) === 0) {
+            thaw++;
+          }
+        }
+        var movedDrop = (beforeCounts[item.index] || 0) -
+          (afterCounts[item.index] || 0);
+        var immediateImprovement = baseCrossings - immediateCrossings;
+        var immediateDamage = Math.max(0, immediateCrossings - baseCrossings);
+
+        // Cheap prefilter: we are looking for a cascade seed, not another tiny
+        // local twitch. It should de-conflict at least one meaningful offender
+        // or immediately lower crossings.
+        if (immediateImprovement <= 0 && maxDrop < 4 && thaw < 2) continue;
+
+        var rollout = stage1Rollout(simulation, options.rolloutSteps || 12);
+        var finalCrossings = rollout.finalCrossings;
+        var downstreamImprovement = baseCrossings - finalCrossings;
+        var score = downstreamImprovement * 12 + immediateImprovement * 3 +
+          maxDrop * 5 + movedDrop * 2 + thaw * 3 -
+          immediateDamage * 4 - rollout.moves.length * 0.25;
+        var accepted = finalCrossings < baseCrossings &&
+          (downstreamImprovement >= (options.requiredImprovement || 2) ||
+           finalCrossings === 0) &&
+          immediateDamage <= (options.maxImmediateDamage === undefined
+            ? Math.max(4, Math.ceil(baseCrossings * 0.3))
+            : options.maxImmediateDamage);
+        var candidate = {
+          node: node,
+          nodeIndex: item.index,
+          fromX: node[0],
+          fromY: node[1],
+          toX: pos[0],
+          toY: pos[1],
+          improvement: immediateImprovement,
+          strategy: 'wasted-tail-cascade-trigger',
+          search: {
+            reason: 'wasted-tail cascade trigger: maximize drop/thaw before cleanup',
+            baseCrossings: baseCrossings,
+            immediateCrossings: immediateCrossings,
+            finalCrossings: finalCrossings,
+            downstreamImprovement: downstreamImprovement,
+            immediateDamage: immediateDamage,
+            maxDrop: maxDrop,
+            movedDrop: movedDrop,
+            thaw: thaw,
+            rolloutMoves: rollout.moves.length,
+            candidateVertices: ranked.map(function(r) { return r.index; }),
+            candidatesTested: tested,
+            elapsedMs: now() - started,
+            score: score,
+            accepted: accepted,
+            storyMetrics: story
+          }
+        };
+        if (accepted && (!best || candidate.search.score > best.search.score)) {
+          best = candidate;
+        }
+      }
+    }
+
+    state.lastCascadeTriggerSearch = {
+      type: 'wasted-tail-cascade-trigger-search',
+      baseCrossings: baseCrossings,
+      candidateVertices: ranked.map(function(item) { return item.index; }),
+      candidatesTested: tested,
+      elapsedMs: now() - started,
+      best: best ? best.search : null
+    };
+    return best;
   }
 
   // Stage 1b: low-degree "sore thumb" vertices often sit on the wrong side of
@@ -6853,6 +7052,121 @@
     // This lets interactive mode intervene at the Stage 1 stuck point
     if (state.pauseBeforeEscape) {
       return { done: false, wouldEscape: true, count: count, stuckCount: state.stuckCount };
+    }
+
+    var wastedTailMetrics = state.storyMetrics || null;
+    if (count <= 80 && state.movesSinceCrossingProgress >= 20) {
+      state.storyState = state.storyState || createStoryState();
+      wastedTailMetrics = updateStoryMetrics(graph, state.storyState, null, count);
+      state.storyMetrics = wastedTailMetrics;
+    }
+    var wastedTailStrong = wastedTailMetrics &&
+      wastedTailMetrics.dwell >= 20 &&
+      wastedTailMetrics.freeze >= 0.88 &&
+      wastedTailMetrics.trend >= -2;
+    if (!wastedTailStrong && count <= 80 &&
+        state.movesSinceCrossingProgress >= 30) {
+      wastedTailStrong = true;
+    }
+
+    if (state.enableCascadeTrigger &&
+        !state.activeStructuralPlan && wastedTailStrong &&
+        count <= 80 &&
+        state.cascadeTriggerAttemptedAtBestCrossings !== state.bestCrossingCount) {
+      state.cascadeTriggerAttemptedAtBestCrossings = state.bestCrossingCount;
+      best = profileSection('wasted-tail-cascade-trigger', function() {
+        return suggestCascadeTriggerMove(graph, state, {
+          timeBudgetMs: 90,
+          rolloutSteps: 12,
+          requiredImprovement: Math.max(2, Math.ceil(count * 0.12))
+        });
+      });
+      if (best) {
+        best.node[0] = best.toX;
+        best.node[1] = best.toY;
+        recordMove(state, best.nodeIndex, best.toX, best.toY);
+        var newCount = intersections(graph.links);
+        best.improvement = count - newCount;
+        state.stuckCount = 0;
+        state.recentAttempts = {};
+        state.finisherAttemptedAtCount = null;
+        return {
+          done: false,
+          improved: newCount < count,
+          move: attachStructuralPlan(state, best),
+          count: newCount
+        };
+      }
+    }
+
+    if (state.enableAnchorBreakAuto &&
+        !state.activeStructuralPlan && wastedTailStrong &&
+        count <= 25 &&
+        !state.anchorBreakAutoAttempted) {
+      state.anchorBreakAutoAttempted = true;
+      var anchorBreakReport = profileSection('anchor-break-barrier-search', function() {
+        return suggestAnchorBreakBarrierTransfer(graph, {
+          timeBudgetMs: 120,
+          componentLimit: 12,
+          barrierLimit: 8,
+          keepCandidates: 6
+        });
+      });
+      state.lastAnchorBreakBarrierSearch = anchorBreakReport;
+      if (anchorBreakReport.best &&
+          anchorBreakReport.best.immediateCrossings < count &&
+          anchorBreakReport.best.immediateDamage === 0 &&
+          (anchorBreakReport.best.immediateCrossings === 0 ||
+           count - anchorBreakReport.best.immediateCrossings >=
+             Math.max(3, Math.ceil(count * 0.25)))) {
+        var anchorBreak = anchorBreakReport.best;
+        beginStructuralPlan(state, {
+          type: 'anchor-break-barrier-transfer',
+          objective: anchorBreak.reason,
+          startedAtCrossings: count,
+          projectedFinalCrossings: anchorBreak.immediateCrossings,
+          movableVertices: anchorBreak.component,
+          protectedVertices: anchorBreak.barrier,
+          separator: anchorBreak.barrier,
+          completionCondition: 'productive-handoff',
+          maxSteps: anchorBreak.positions.length + 4,
+          baseMetrics: {
+            crossings: count
+          },
+          projectedMetrics: {
+            immediateCrossings: anchorBreak.immediateCrossings,
+            downstreamImprovement: anchorBreak.downstreamImprovement,
+            barrierCrossings: anchorBreak.barrierCrossings
+          }
+        });
+        state.pendingStructuralMoves = anchorBreak.positions.slice();
+        state.pendingStructuralReason = anchorBreak.reason;
+        best = takePendingStructuralMove(graph, state);
+        best.search.anchorBreakBarrier = {
+          barrier: anchorBreak.barrier,
+          component: anchorBreak.component,
+          barrierCrossings: anchorBreak.barrierCrossings,
+          crossingEdges: anchorBreak.crossingEdges,
+          immediateCrossings: anchorBreak.immediateCrossings,
+          downstreamImprovement: anchorBreak.downstreamImprovement,
+          candidatesTested: anchorBreakReport.candidatesTested,
+          elapsedMs: anchorBreakReport.elapsedMs
+        };
+        best.node[0] = best.toX;
+        best.node[1] = best.toY;
+        recordMove(state, best.nodeIndex, best.toX, best.toY);
+        var newCount = intersections(graph.links);
+        best.improvement = count - newCount;
+        state.stuckCount = 0;
+        state.recentAttempts = {};
+        state.finisherAttemptedAtCount = null;
+        return {
+          done: false,
+          improved: newCount < count,
+          move: best,
+          count: newCount
+        };
+      }
     }
 
     // Stage 1c auto hook, currently conservative and small-graph-only. This
@@ -7551,6 +7865,7 @@
   exports.suggestStage2Restart = suggestStage2Restart;
   exports.applyStage2Suggestion = applyStage2Suggestion;
   exports.suggestStage1cResetPlan = suggestStage1cResetPlan;
+  exports.suggestCascadeTriggerMove = suggestCascadeTriggerMove;
   exports.findAdaptiveMinimizeMove = findAdaptiveMinimizeMove;
   exports.findReducingSideFlipMove = findReducingSideFlipMove;
   exports.minimizeStep = minimizeStep;
@@ -7574,6 +7889,8 @@
   exports.weightedCentroid = weightedCentroid;
   exports.anchorScore = anchorScore;
   exports.findBarrierMove = findBarrierMove;
+  exports.setDeterministicClock = setDeterministicClock;
+  exports.getClockState = getClockState;
   exports.setProfilerEnabled = setProfilerEnabled;
   exports.resetProfiler = resetProfiler;
   exports.getProfilerReport = getProfilerReport;

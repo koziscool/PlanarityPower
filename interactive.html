@@ -179,6 +179,7 @@
       <button id="reset-btn">New Graph</button>
       <label><input type="checkbox" id="show-numbers"> Show vertex #</label>
       <label><input type="checkbox" id="pause-on-escape" checked> Pause on escape</label>
+      <label><input type="checkbox" id="deterministic-clock"> Deterministic solver clock</label>
       <span id="status"></span>
     </div>
   </div>
@@ -275,6 +276,15 @@
     var computeProgressMetrics = Solver.computeProgressMetrics;
     var createStoryState = Solver.createStoryState;
     var updateStoryMetrics = Solver.updateStoryMetrics;
+
+    function applySolverClock(reset) {
+      var checkbox = document.getElementById('deterministic-clock');
+      if (!Solver.setDeterministicClock) return;
+      Solver.setDeterministicClock(checkbox && checkbox.checked, {
+        startMs: reset ? 0 : (Solver.getClockState ? Solver.getClockState().tick : 0),
+        stepMs: 1
+      });
+    }
 
     // Live story/cascade-state metrics for the current puzzle, computed by
     // replaying the move history through a fresh story-state. Cached on history
@@ -496,6 +506,7 @@
     // Uses the same solver logic as the dashboard (from solver.js)
     
     function executeStep(puzzle, callback, minimizeOnly) {
+      applySolverClock(false);
       var graph = puzzle.graph;
       puzzle.count = intersections(graph.links);
       
@@ -791,6 +802,11 @@
         schemaVersion: 2,
         timestamp: new Date().toISOString(),
         session: sessionId,
+        config: {
+          deterministicClock: Boolean(
+            document.getElementById('deterministic-clock') &&
+            document.getElementById('deterministic-clock').checked)
+        },
         currentPosition: puzzle.historyIndex,
         headPosition: puzzle.history.length - 1,
         lastMove: puzzle.history.length ? puzzle.history[puzzle.history.length - 1].move : null,
@@ -1032,6 +1048,11 @@
         schemaVersion: 2,
         timestamp: new Date().toISOString(),
         session: sessionId,
+        config: {
+          deterministicClock: Boolean(
+            document.getElementById('deterministic-clock') &&
+            document.getElementById('deterministic-clock').checked)
+        },
         moves: puzzle.moves,
         crossings: puzzle.count,
         currentPosition: puzzle.historyIndex,
@@ -1250,6 +1271,7 @@
     
     function createPuzzles() {
       try {
+        applySolverClock(true);
         console.log('createPuzzles starting...');
         var numNodes = parseInt(document.getElementById('num-nodes').value) || 40;
         var container = document.getElementById('puzzle-container');
@@ -1841,6 +1863,7 @@
       }
       
       running = true;
+      applySolverClock(true);
       document.getElementById('btn-run').textContent = 'Stop';
       
       function tick() {
@@ -1885,6 +1908,7 @@
       button.textContent = 'Analyzing...';
 
       setTimeout(function() {
+        applySolverClock(false);
         var report = suggestStage2Restart(puzzle.graph);
         report.separatorReshape = suggestSeparatorReshape(puzzle.graph);
         report.anchorBreakBarrier = suggestAnchorBreakBarrierTransfer(puzzle.graph);
@@ -1957,6 +1981,7 @@
       button.disabled = true;
       button.textContent = 'Analyzing...';
       setTimeout(function() {
+        applySolverClock(false);
         var report = Solver.suggestStage1cResetPlan(puzzle.graph, {
           timeBudgetMs: 900,
           seedLimit: 0,
@@ -2056,6 +2081,7 @@
       button.disabled = true;
       button.textContent = 'Analyzing...';
       setTimeout(function() {
+        applySolverClock(false);
         var report = Solver.suggestRegionCompactionPlan(puzzle.graph, {
           timeBudgetMs: 400,
           cleanupSteps: 12
@@ -2126,6 +2152,7 @@
       updateStage2Diagnosis(puzzle, null);
       var movesApplied = 0;
       var maxMoves = 12;
+      applySolverClock(false);
       
       while (movesApplied < maxMoves) {
         var move = Solver.suggestRegionReorganizationMove(graph, {
@@ -2281,6 +2308,11 @@
     function exportStats() {
       var report = {
         timestamp: new Date().toISOString(),
+        config: {
+          deterministicClock: Boolean(
+            document.getElementById('deterministic-clock') &&
+            document.getElementById('deterministic-clock').checked)
+        },
         summary: {
           totalSolved: stats.totalSolved,
           totalStuck: stats.totalStuck,

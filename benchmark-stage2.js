@@ -51,6 +51,12 @@ function runPuzzle(index, sourceGraph, maxMoves) {
   const graph = cloneGraph(sourceGraph);
   const initialCrossings = solver.intersections(graph.links);
   const state = {};
+  if (process.env.ENABLE_CASCADE_TRIGGER === '1') {
+    state.enableCascadeTrigger = true;
+  }
+  if (process.env.ENABLE_ANCHOR_BREAK_AUTO === '1') {
+    state.enableAnchorBreakAuto = true;
+  }
   const strategies = {};
   const crossingHistory = [initialCrossings];
   const extensionPlans = [];
@@ -271,12 +277,10 @@ const graphBatch = generateBatch(config.puzzles, config.nodes, config.seed);
 const graphSignatures = graphBatch.map(graphSignature);
 Math.random = seededRandom(config.seed ^ 0x9e3779b9);
 const realDateNow = Date.now.bind(Date);
-const originalDateNow = Date.now;
 if (config.deterministicClock) {
-  let fakeNow = 0;
-  Date.now = function() {
-    return fakeNow++;
-  };
+  solver.setDeterministicClock(true);
+} else if (solver.setDeterministicClock) {
+  solver.setDeterministicClock(false);
 }
 const startedAt = realDateNow();
 const results = [];
@@ -292,7 +296,7 @@ for (let i = 0; i < config.puzzles; i++) {
 }
 
 if (config.deterministicClock) {
-  Date.now = originalDateNow;
+  solver.setDeterministicClock(false);
 }
 const report = summarize(results, config, realDateNow() - startedAt);
 report.graphSignatures = graphSignatures;

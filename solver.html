@@ -113,6 +113,7 @@
     <label>Nodes: <input type="number" id="num-nodes" value="30" min="10" max="100" style="width:50px"></label>
     <label>Speed: <input type="range" id="speed" min="1" max="100" value="70" style="width:100px"></label>
     <label><input type="checkbox" id="auto-add" checked> Auto-add replacements</label>
+    <label><input type="checkbox" id="deterministic-clock"> Deterministic solver clock</label>
     <button id="start-btn">Start</button>
     <button id="add-btn">+6 More</button>
     <button id="reset-btn">Clear All</button>
@@ -142,6 +143,15 @@
     var computeProgressMetrics = Solver.computeProgressMetrics;
     var createStoryState = Solver.createStoryState;
     var updateStoryMetrics = Solver.updateStoryMetrics;
+
+    function applySolverClock(reset) {
+      var checkbox = document.getElementById('deterministic-clock');
+      if (!Solver.setDeterministicClock) return;
+      Solver.setDeterministicClock(checkbox && checkbox.checked, {
+        startMs: reset ? 0 : (Solver.getClockState ? Solver.getClockState().tick : 0),
+        stepMs: 1
+      });
+    }
     
     var puzzles = [];
     var running = false;
@@ -393,6 +403,7 @@
     }
     
     function solverStep(puzzle, callback) {
+      applySolverClock(false);
       var graph = puzzle.graph;
       puzzle.count = intersections(graph.links);
       
@@ -598,6 +609,7 @@
     }
     
     function createPuzzles() {
+      applySolverClock(true);
       var grid = document.getElementById('grid');
       grid.innerHTML = '';
       puzzles = [];
@@ -661,6 +673,11 @@
         schemaVersion: 1,
         timestamp: new Date().toISOString(),
         session: 'solver-dashboard',
+        config: {
+          deterministicClock: Boolean(
+            document.getElementById('deterministic-clock') &&
+            document.getElementById('deterministic-clock').checked)
+        },
         stats: stats,
         puzzles: puzzles.map(puzzleExportSummary)
       };
@@ -674,6 +691,11 @@
         schemaVersion: 2,
         timestamp: new Date().toISOString(),
         session: 'solver-' + puzzle.id,
+        config: {
+          deterministicClock: Boolean(
+            document.getElementById('deterministic-clock') &&
+            document.getElementById('deterministic-clock').checked)
+        },
         nodes: graphPositions(puzzle.graph),
         edges: puzzle.edges || graphEdges(puzzle.graph),
         currentPosition: Math.max(0, replaySnapshots.length - 1),
@@ -731,6 +753,7 @@
         return;
       }
       running = true;
+      applySolverClock(true);
       document.getElementById('start-btn').textContent = 'Stop';
       
       function tick() {

@@ -7059,8 +7059,8 @@
     // crossed side has a clean stopping point, so a bounded component transfer
     // can be completed and locally repaired before Stage 1 reacts to temporary
     // motor-control crossings.
-    if (!state.activeStructuralPlan && graph.nodes.length <= 60 &&
-        count <= 20 && state.movesSinceCrossingProgress >= 8 &&
+    if (!state.activeStructuralPlan && graph.nodes.length <= 100 &&
+        count <= 80 && state.movesSinceCrossingProgress >= 8 &&
         state.cleanAnchorBreakAttemptedAtBestCrossings !==
           state.bestCrossingCount) {
       state.cleanAnchorBreakAttemptedAtBestCrossings =
@@ -7070,9 +7070,9 @@
         function() {
           return suggestAnchorBreakBarrierTransfer(graph, {
             timeBudgetMs: 120,
-            componentLimit: 12,
+            componentLimit: 25,
             barrierLimit: 8,
-            cleanupSteps: 6,
+            cleanupSteps: 15,
             keepCandidates: 6
           });
         });
@@ -7523,15 +7523,15 @@
     }
 
     if (!state.activeStructuralPlan && wastedTailStrong &&
-        count <= 25 &&
+        count <= 80 &&
         !state.anchorBreakAutoAttempted) {
       state.anchorBreakAutoAttempted = true;
       var anchorBreakReport = profileSection('anchor-break-barrier-search', function() {
         return suggestAnchorBreakBarrierTransfer(graph, {
           timeBudgetMs: 120,
-          componentLimit: 12,
+          componentLimit: 25,
           barrierLimit: 8,
-          cleanupSteps: 6,
+          cleanupSteps: 15,
           keepCandidates: 6
         });
       });
@@ -7540,7 +7540,7 @@
         anchorBreakReport.best.cleanAnchorBreaks &&
         anchorBreakReport.best.cleanAnchorBreaks.length > 0;
       var cleanAnchorBreakDefault =
-        hasCleanAnchorBreak && count <= 20 &&
+        hasCleanAnchorBreak && count <= 80 &&
         anchorBreakReport.best.finalDamage === 0 &&
         anchorBreakReport.best.finalCrossings < count;
       var optInAnchorBreak =

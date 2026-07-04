@@ -113,6 +113,49 @@ These are available as interactive buttons but removed from the auto solver loop
 - **Why**: Captures visually obvious "sore thumb belongs across this edge/in
   this enclosure" moves without opening the much larger component-move search.
 
+### High-Crossing Stage 1c: Nucleus Creation
+- **What**: In larger graphs (`<=60` vertices) that stall with crossings still
+  near/above the ordinary region-extension handoff (`50 < crossings <= 160`),
+  try one bounded Stage 1c group reset when the largest clean region is still weak
+  (`largestCleanRegion / N < 0.25`) and crossings have not set a new low for at
+  least 20 moves.
+- **Acceptance**: The short rollout must improve crossings by at least
+  `max(8, ceil(0.10 * crossings))`. Temporary immediate damage is allowed up
+  to `max(45, ceil(0.35 * crossings))` because the point is to create a better
+  current-position state for Stage 1, not to perform a monotone descent move.
+- **Execution**: The structural plan now executes the group reset plus the
+  deterministic cleanup rollout used by the acceptance simulation. Earlier
+  versions accepted on the rollout but only executed the reset, which made the
+  projection too optimistic.
+- **Why**: 50-vertex failures exposed a new regime: high-crossing stalls with
+  almost no clean nucleus, where region extension never fires because the graph
+  never reaches the `<=80` crossing gate. On seed `12345`, `20` puzzles,
+  `50` vertices, `600` move cap, deterministic clock, this hook moved the sample
+  from `11/20` solved to `14/20` solved; failed median crossings dropped from
+  `84` to `47`, and failures with no extension plan dropped from `6` to `2`.
+- **Caveat**: This is a current-position structural reset, not rollback. It can
+  alter trajectories. A follow-up first-five comparison across seeds `12345`,
+  `1`, `2`, `3`, and `4` preserved solve count (`14/25` before and after the
+  rollout/wider-gate tweak) while reducing residual crossings (`483 -> 325`).
+  That is useful regime progress, but not yet a proven solve-rate improvement.
+
+### Anchor-Break Barrier Gate Liberalization
+- **What**: The automatic anchor-break barrier search now uses a larger
+  structural budget for larger graphs: `count <= 120`, `componentLimit: 40`,
+  `barrierLimit: 14`, `cleanupSteps: 24`, `timeBudgetMs: 250`.
+- **Why**: 60-vertex failures showed the previous gate (`count <= 80`,
+  `componentLimit: 25`) missing textbook anchor-break transfers. In seed
+  `12345`, graph 4 had a zero-damage 29-vertex transfer available from
+  `81 -> ~56`, but the old gate missed it by both count and component limit.
+- **Observed 60v effect**: On `node benchmark-stage2.js 5 60 800 12345
+  --deterministic-clock`, the solve count stayed `3/5`, but the failure profile
+  improved sharply: residuals changed from `96, 81` to `19, 7`, graph 4 solved,
+  and the long successful graph 3 dropped from `508` moves to `291`.
+- **Rejected variant**: Raising the default count ceiling further to `160`
+  converted one high-crossing seed-2 failure, but regressed seed `12345` from
+  `3/5` to `2/5` by turning solved graphs into near-endgame misses. Keep `160`
+  as an experiment/conditional idea, not default policy.
+
 ## Historical Approaches (No Longer in Code)
 
 ### "Repel" Strategy

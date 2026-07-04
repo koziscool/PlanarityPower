@@ -2294,6 +2294,83 @@
     };
   }
 
+  function tryAnchorBreakEndpointRoomMoves(graph, barrier, component, targetSign,
+      margin) {
+    var barrierA = graph.nodes.indexOf(barrier[0]);
+    var barrierB = graph.nodes.indexOf(barrier[1]);
+    if (barrierA < 0 || barrierB < 0) return [];
+
+    var edgeDx = barrier[1][0] - barrier[0][0];
+    var edgeDy = barrier[1][1] - barrier[0][1];
+    var edgeLength = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy);
+    if (edgeLength < 1e-8) return [];
+
+    var normal = [-edgeDy / edgeLength, edgeDx / edgeLength];
+    if (targetSign > 0) normal = [-normal[0], -normal[1]];
+
+    var componentCenter = centroid(component.map(function(index) {
+      return graph.nodes[index];
+    }));
+    var endpointBaseCounts = getCrossingCounts(graph);
+    var simulation = cloneGraph(graph);
+    var accepted = [];
+    var baseTotal = intersections(simulation.links);
+    var steps = [margin * 1.2, margin * 2.0, margin * 3.0, 0.025, 0.04];
+
+    [barrierA, barrierB].forEach(function(index) {
+      var original = graph.nodes[index];
+      var best = null;
+
+      steps.forEach(function(step) {
+        var lateral = [
+          (componentCenter[0] - original[0]) * 0.08,
+          (componentCenter[1] - original[1]) * 0.08
+        ];
+        var x = Math.max(0.02, Math.min(0.98,
+          original[0] + normal[0] * step + lateral[0]));
+        var y = Math.max(0.02, Math.min(0.98,
+          original[1] + normal[1] * step + lateral[1]));
+
+        var beforeX = simulation.nodes[index][0];
+        var beforeY = simulation.nodes[index][1];
+        simulation.nodes[index][0] = x;
+        simulation.nodes[index][1] = y;
+        var counts = getCrossingCounts(simulation);
+        var total = intersections(simulation.links);
+        simulation.nodes[index][0] = beforeX;
+        simulation.nodes[index][1] = beforeY;
+
+        if ((counts[barrierA] || 0) > (endpointBaseCounts[barrierA] || 0) ||
+            (counts[barrierB] || 0) > (endpointBaseCounts[barrierB] || 0)) {
+          return;
+        }
+        var score = total - baseTotal - step * 0.01;
+        if (!best || score < best.score) {
+          best = {
+            index: index,
+            x: x,
+            y: y,
+            mode: 'anchor-break-endpoint-room',
+            strategy: 'anchor-break-endpoint-room',
+            endpointCrossingsBefore: endpointBaseCounts[index] || 0,
+            endpointCrossingsAfter: counts[index] || 0,
+            totalCrossingsAfter: total,
+            score: score
+          };
+        }
+      });
+
+      if (best) {
+        simulation.nodes[index][0] = best.x;
+        simulation.nodes[index][1] = best.y;
+        baseTotal = intersections(simulation.links);
+        accepted.push(best);
+      }
+    });
+
+    return accepted;
+  }
+
   function anchorBreakTransferPositions(graph, barrier, component, targetSign,
       margin) {
     var simulation = cloneGraph(graph);
@@ -2311,7 +2388,19 @@
       return Math.abs(sideOfEdge(barrier, graph.nodes[a])) -
         Math.abs(sideOfEdge(barrier, graph.nodes[b]));
     });
-    var positions = [];
+    var positions = tryAnchorBreakEndpointRoomMoves(
+      graph, barrier, component, targetSign, margin);
+    positions.forEach(function(position) {
+      simulation.nodes[position.index][0] = position.x;
+      simulation.nodes[position.index][1] = position.y;
+    });
+    simBarrier = [simulation.nodes[barrierA], simulation.nodes[barrierB]];
+    edgeDx = simBarrier[1][0] - simBarrier[0][0];
+    edgeDy = simBarrier[1][1] - simBarrier[0][1];
+    edgeLength = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy);
+    if (edgeLength < 1e-8) return null;
+    normal = [-edgeDy / edgeLength, edgeDx / edgeLength];
+    if (targetSign < 0) normal = [-normal[0], -normal[1]];
 
     ordered.forEach(function(index) {
       var points = [];
@@ -6430,6 +6519,8 @@
       var crossingsAfter = intersections(graph.links);
       moves.push({
         vertex: move.nodeIndex,
+        x: move.toX,
+        y: move.toY,
         strategy: move.strategy,
         improvement: move.improvement,
         crossingsAfter: crossingsAfter
@@ -7150,7 +7241,7 @@
     // can be completed and locally repaired before Stage 1 reacts to temporary
     // motor-control crossings.
     if (!state.activeStructuralPlan && graph.nodes.length <= 100 &&
-        count <= 80 && state.movesSinceCrossingProgress >= 8 &&
+        count <= 120 && state.movesSinceCrossingProgress >= 8 &&
         state.cleanAnchorBreakAttemptedAtBestCrossings !==
           state.bestCrossingCount) {
       state.cleanAnchorBreakAttemptedAtBestCrossings =
@@ -7159,10 +7250,10 @@
         'clean-anchor-break-barrier-search',
         function() {
           return suggestAnchorBreakBarrierTransfer(graph, {
-            timeBudgetMs: 120,
-            componentLimit: 25,
-            barrierLimit: 8,
-            cleanupSteps: 15,
+            timeBudgetMs: 250,
+            componentLimit: 40,
+            barrierLimit: 14,
+            cleanupSteps: 24,
             keepCandidates: 6
           });
         });
@@ -7568,7 +7659,7 @@
     }
 
     var wastedTailMetrics = state.storyMetrics || null;
-    if (count <= 80 && state.movesSinceCrossingProgress >= 20) {
+    if (count <= 120 && state.movesSinceCrossingProgress >= 20) {
       state.storyState = state.storyState || createStoryState();
       wastedTailMetrics = updateStoryMetrics(graph, state.storyState, null, count);
       state.storyMetrics = wastedTailMetrics;
@@ -7577,7 +7668,7 @@
       wastedTailMetrics.dwell >= 20 &&
       wastedTailMetrics.freeze >= 0.88 &&
       wastedTailMetrics.trend >= -2;
-    if (!wastedTailStrong && count <= 80 &&
+    if (!wastedTailStrong && count <= 120 &&
         state.movesSinceCrossingProgress >= 30) {
       wastedTailStrong = true;
     }
@@ -7613,15 +7704,15 @@
     }
 
     if (!state.activeStructuralPlan && wastedTailStrong &&
-        count <= 80 &&
+        count <= 120 &&
         !state.anchorBreakAutoAttempted) {
       state.anchorBreakAutoAttempted = true;
       var anchorBreakReport = profileSection('anchor-break-barrier-search', function() {
         return suggestAnchorBreakBarrierTransfer(graph, {
-          timeBudgetMs: 120,
-          componentLimit: 25,
-          barrierLimit: 8,
-          cleanupSteps: 15,
+          timeBudgetMs: 250,
+          componentLimit: 40,
+          barrierLimit: 14,
+          cleanupSteps: 24,
           keepCandidates: 6
         });
       });
@@ -7630,7 +7721,7 @@
         anchorBreakReport.best.cleanAnchorBreaks &&
         anchorBreakReport.best.cleanAnchorBreaks.length > 0;
       var cleanAnchorBreakDefault =
-        hasCleanAnchorBreak && count <= 80 &&
+        hasCleanAnchorBreak && count <= 120 &&
         anchorBreakReport.best.finalDamage === 0 &&
         anchorBreakReport.best.finalCrossings < count;
       var optInAnchorBreak =
@@ -7651,6 +7742,116 @@
           move: anchorBreakResult.move,
           count: anchorBreakResult.count
         };
+      }
+    }
+
+    // Large-graph Stage 1c / nucleus creation. At 50 vertices the old Stage 1c
+    // gate was too small-graph-only: several failures stall above the region
+    // extension threshold with almost no clean nucleus. Use a bounded group
+    // reset to shorten/collect a local structure and hand Stage 1 a better
+    // target-rich state. This is current-position reasoning, not rollback.
+    if (!state.activeStructuralPlan &&
+        graph.nodes.length <= 60 &&
+        count > 50 && count <= 160 &&
+        state.movesSinceCrossingProgress >= 20 &&
+        state.highCrossingStage1cAttemptedAtBestCrossings !==
+          state.bestCrossingCount) {
+      var highCrossingAnalysis = analyzeGraphState(graph, {});
+      var highCrossingNucleusFraction = graph.nodes.length > 0
+        ? highCrossingAnalysis.largestCleanRegion / graph.nodes.length : 0;
+      if (highCrossingNucleusFraction < 0.25) {
+        state.highCrossingStage1cAttemptedAtBestCrossings =
+          state.bestCrossingCount;
+        var highCrossingStage1cReport =
+          profileSection('high-crossing-stage1c-reset-search', function() {
+            return suggestStage1cResetPlan(graph, {
+              timeBudgetMs: 220,
+              seedLimit: 0,
+              geometricSeedLimit: 24,
+              minGroupSize: 2,
+              maxGroupSize: 4,
+              scales: [0.75, 1.0],
+              targetBlends: [1.0, 1.2],
+              maxImmediateDamage: Math.max(45, Math.ceil(count * 0.35)),
+              cleanupSteps: 25
+            });
+          });
+        state.lastStage1cSearch = highCrossingStage1cReport;
+        var highCrossingRequiredGain = Math.max(8, Math.ceil(count * 0.1));
+        if (highCrossingStage1cReport.best &&
+            count - highCrossingStage1cReport.best.finalCrossings >=
+              highCrossingRequiredGain) {
+          var highCrossingReset = highCrossingStage1cReport.best;
+          beginStructuralPlan(state, {
+            type: 'stage1c-reset',
+            objective: 'high-crossing nucleus reset: ' +
+              highCrossingReset.reason,
+            startedAtCrossings: count,
+            projectedFinalCrossings: highCrossingReset.finalCrossings,
+            movableVertices: highCrossingReset.group,
+            protectedVertices: [],
+            completionCondition: 'stage1c-handoff',
+            maxSteps: highCrossingReset.scheduledMoves.length +
+              highCrossingReset.rolloutMoves + 3,
+            baseMetrics: {
+              crossings: count,
+              nucleusFraction: highCrossingNucleusFraction
+            },
+            projectedMetrics: {
+              immediateCrossings: highCrossingReset.immediateCrossings,
+              finalCrossings: highCrossingReset.finalCrossings,
+              netGain: highCrossingReset.netGain,
+              recoveryGain: highCrossingReset.recoveryGain
+            }
+          });
+          state.pendingStructuralMoves =
+            highCrossingReset.scheduledMoves.map(function(move) {
+              return {
+                index: move.index,
+                x: move.x,
+                y: move.y,
+                mode: move.mode
+              };
+            }).concat(highCrossingReset.rollout.map(function(move) {
+              return {
+                index: move.vertex,
+                x: move.x,
+                y: move.y,
+                mode: 'stage1c-rollout'
+              };
+            }));
+          state.pendingStructuralReason = 'high-crossing nucleus reset: ' +
+            highCrossingReset.reason;
+          best = takePendingStructuralMove(graph, state);
+          best.search.stage1cReset = {
+            group: highCrossingReset.group,
+            immediateCrossings: highCrossingReset.immediateCrossings,
+            immediateDamage: highCrossingReset.immediateDamage,
+            projectedFinalCrossings: highCrossingReset.finalCrossings,
+            netGain: highCrossingReset.netGain,
+            recoveryGain: highCrossingReset.recoveryGain,
+            rolloutMoves: highCrossingReset.rolloutMoves,
+            afterProbe: highCrossingReset.afterProbe,
+            lengthProfile: highCrossingReset.lengthProfile,
+            candidatesTested: highCrossingStage1cReport.candidatesTested,
+            elapsedMs: highCrossingStage1cReport.elapsedMs,
+            nucleusFraction: highCrossingNucleusFraction
+          };
+          best.node[0] = best.toX;
+          best.node[1] = best.toY;
+          recordMove(state, best.nodeIndex, best.toX, best.toY);
+          var newCount = intersections(graph.links);
+          best.improvement = count - newCount;
+          state.stuckCount = 0;
+          state.recentAttempts = {};
+          state.finisherAttemptedAtCount = null;
+          return {
+            done: false,
+            improved: newCount < count,
+            move: best,
+            count: newCount
+          };
+        }
       }
     }
 

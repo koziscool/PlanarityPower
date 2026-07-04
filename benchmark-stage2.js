@@ -47,6 +47,132 @@ function generateBatch(puzzleCount, nodeCount, seed) {
   return graphs;
 }
 
+function rounded(value, digits = 3) {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Number(value.toFixed(digits)) : value;
+}
+
+function summarizeSearchReport(report) {
+  if (!report) return null;
+  const best = report.best || null;
+  return {
+    type: report.type || null,
+    candidatesTested: report.candidatesTested || 0,
+    elapsedMs: rounded(report.elapsedMs || 0, 1),
+    timedOut: Boolean(report.timedOut),
+    hasBest: Boolean(best),
+    bestType: best && (best.type || best.strategy || null),
+    bestFinalCrossings: best && best.finalCrossings !== undefined
+      ? best.finalCrossings : null,
+    bestImmediateCrossings: best && best.immediateCrossings !== undefined
+      ? best.immediateCrossings : null,
+    bestImmediateDamage: best && best.immediateDamage !== undefined
+      ? best.immediateDamage : null,
+    bestComponentSize: best && best.component ? best.component.length : null,
+    bestReason: best && (best.reason || best.objective || null)
+  };
+}
+
+function captureMetricSnapshot(graph, solverState, metricState, move, strategy) {
+  const analysis = solver.analyzeGraphState(graph, metricState.analysisState);
+  const progress = solver.computeProgressMetrics(graph, analysis);
+  const story = solver.updateStoryMetrics(
+    graph, metricState.storyState, analysis.crossingCounts, analysis.crossings);
+  const regime = solver.computeRegimeMetrics(
+    graph, analysis, story, metricState.regimeState);
+  const topOffenders = (analysis.crossingConcentration || [])
+    .slice(0, 5)
+    .map(item => ({
+      index: item.index !== undefined ? item.index : item.vertex,
+      crossings: item.crossings,
+      degree: item.degree
+    }));
+
+  return {
+    move,
+    strategy: strategy || null,
+    crossings: analysis.crossings,
+    cleanVertices: analysis.cleanVertices,
+    cleanRatio: rounded(analysis.cleanRatio),
+    largestCleanRegion: analysis.largestCleanRegion,
+    progress: rounded(progress.progress),
+    nearCleanRatio: rounded(progress.nearCleanRatio),
+    cleanEdgeRatio: rounded(progress.cleanEdgeRatio),
+    topCrossingShare: rounded(progress.topCrossingShare),
+    freeze: story ? rounded(story.freeze) : null,
+    dwell: story ? story.dwell : null,
+    crowd: story ? story.crowd : null,
+    trend: story ? story.trend : null,
+    thaw: story ? story.thaw : null,
+    drop: story ? story.drop : null,
+    bulkReduction: regime ? rounded(regime.bulkReduction) : null,
+    nucleusBuilding: regime ? rounded(regime.nucleusBuilding) : null,
+    nucleusFraction: regime ? rounded(regime.nucleusFraction) : null,
+    nucleusSolidity: regime ? rounded(regime.nucleusSolidity) : null,
+    nucleusGrowth: regime ? rounded(regime.nucleusGrowth) : null,
+    boundaryConcentration: regime ? rounded(regime.boundaryConcentration) : null,
+    edgeLengthSlack: regime ? rounded(regime.edgeLengthSlack, 2) : null,
+    movesSinceCrossingProgress: solverState.movesSinceCrossingProgress || 0,
+    stuckCount: solverState.stuckCount || 0,
+    activeStructuralPlan: analysis.activeStructuralPlan,
+    lastStructuralPlan: analysis.lastStructuralPlan,
+    topOffenders
+  };
+}
+
+function searchDiagnostics(state) {
+  return {
+    lastRegionExtensionSearch:
+      summarizeSearchReport(state.lastRegionExtensionSearch),
+    lastCompactionSearch:
+      summarizeSearchReport(state.lastCompactionSearch),
+    lastAnchorBreakBarrierSearch:
+      summarizeSearchReport(state.lastAnchorBreakBarrierSearch),
+    lastBarrierTransferSearch:
+      summarizeSearchReport(state.lastBarrierTransferSearch),
+    lastContainedTriangleSearch:
+      summarizeSearchReport(state.lastContainedTriangleSearch),
+    lastProblemChildInversionSearch:
+      summarizeSearchReport(state.lastProblemChildInversionSearch),
+    lastCascadeTriggerSearch:
+      summarizeSearchReport(state.lastCascadeTriggerSearch),
+    lastStage1cSearch:
+      summarizeSearchReport(state.lastStage1cSearch)
+  };
+}
+
+function classifyFailure(result) {
+  const buckets = [];
+  const finalMetrics = result.finalMetrics || {};
+  const final = result.finalCrossings;
+  const escapeMoves = (result.strategies['escape-random'] || 0) +
+    (result.strategies['escape-boundary'] || 0) +
+    (result.strategies['escape-centroid'] || 0);
+
+  if (final <= 15) buckets.push('near-endgame');
+  if (final >= 50) buckets.push('high-crossing-stall');
+  if (result.extensionPlanCount === 0) buckets.push('no-extension-fired');
+  if (result.extensionPlanCount > 0 && final > 0) {
+    buckets.push('extension-fired-but-not-enough');
+  }
+  if (finalMetrics.dwell >= 20 && finalMetrics.freeze >= 0.88 &&
+      finalMetrics.trend >= -2) {
+    buckets.push('wasted-tail');
+  }
+  if (escapeMoves >= Math.max(20, result.moves * 0.25)) {
+    buckets.push('random-escape-heavy');
+  }
+  if (finalMetrics.nucleusFraction !== null &&
+      finalMetrics.nucleusFraction < 0.25 && final >= 50) {
+    buckets.push('weak-nucleus');
+  }
+  if (finalMetrics.boundaryConcentration !== null &&
+      finalMetrics.boundaryConcentration >= 0.5 && final > 0) {
+    buckets.push('boundary-concentrated');
+  }
+  return buckets.length ? buckets : ['uncategorized'];
+}
+
 function runPuzzle(index, sourceGraph, maxMoves) {
   const graph = cloneGraph(sourceGraph);
   const initialCrossings = solver.intersections(graph.links);
@@ -60,6 +186,15 @@ function runPuzzle(index, sourceGraph, maxMoves) {
   const strategies = {};
   const crossingHistory = [initialCrossings];
   const extensionPlans = [];
+  const metricState = {
+    analysisState: {},
+    storyState: solver.createStoryState(),
+    regimeState: solver.createRegimeState()
+  };
+  const metricTail = [];
+  let finalMetrics = captureMetricSnapshot(
+    graph, state, metricState, 0, 'initial');
+  let bestMetrics = finalMetrics;
   let activeExtension = null;
   let solved = false;
   let stopReason = 'move-cap';
@@ -81,6 +216,13 @@ function runPuzzle(index, sourceGraph, maxMoves) {
     moves++;
     strategies[result.move.strategy] = (strategies[result.move.strategy] || 0) + 1;
     crossingHistory.push(result.count);
+    finalMetrics = captureMetricSnapshot(
+      graph, state, metricState, moves, result.move.strategy);
+    metricTail.push(finalMetrics);
+    if (metricTail.length > 25) metricTail.shift();
+    if (finalMetrics.crossings <= bestMetrics.crossings) {
+      bestMetrics = finalMetrics;
+    }
 
     const plan = result.move.search && result.move.search.structuralPlan;
     if (result.move.strategy === 'stage2-region-extension' && plan) {
@@ -124,6 +266,10 @@ function runPuzzle(index, sourceGraph, maxMoves) {
   }
 
   const finalCrossings = solver.intersections(graph.links);
+  if (moves === 0 || finalMetrics.crossings !== finalCrossings) {
+    finalMetrics = captureMetricSnapshot(
+      graph, state, metricState, moves, stopReason);
+  }
   if (activeExtension) {
     activeExtension.endMove = moves;
     activeExtension.completed = false;
@@ -133,7 +279,7 @@ function runPuzzle(index, sourceGraph, maxMoves) {
     plan.netRecovery = plan.startCrossings - plan.bestLaterCrossings;
   });
 
-  return {
+  const result = {
     puzzle: index + 1,
     solved,
     stopReason,
@@ -147,8 +293,15 @@ function runPuzzle(index, sourceGraph, maxMoves) {
     extensionPlans,
     extensionPlanCount: extensionPlans.length,
     recoveredExtensionPlans: extensionPlans.filter(p => p.recoveredBelowStart).length,
-    completedExtensionPlans: extensionPlans.filter(p => p.completed).length
+    completedExtensionPlans: extensionPlans.filter(p => p.completed).length,
+    finalMetrics,
+    bestMetrics,
+    failureBuckets: solved ? [] : null,
+    searchDiagnostics: searchDiagnostics(state),
+    metricTail: solved ? [] : metricTail
   };
+  if (!result.solved) result.failureBuckets = classifyFailure(result);
+  return result;
 }
 
 function summarize(results, config, elapsedMs) {
@@ -166,6 +319,12 @@ function summarize(results, config, elapsedMs) {
   results.forEach(result => {
     Object.entries(result.strategies).forEach(([strategy, count]) => {
       strategyTotals[strategy] = (strategyTotals[strategy] || 0) + count;
+    });
+  });
+  const failureBuckets = {};
+  failed.forEach(result => {
+    result.failureBuckets.forEach(bucket => {
+      failureBuckets[bucket] = (failureBuckets[bucket] || 0) + 1;
     });
   });
 
@@ -188,10 +347,26 @@ function summarize(results, config, elapsedMs) {
       recoveredExtensionPlans: recoveredPlans.length,
       recoveryRate: plans.length ? recoveredPlans.length / plans.length : null,
       solvedWithExtensionPlan: solved.filter(result => result.extensionPlanCount > 0).length,
+      failedWithNoExtensionPlan:
+        failed.filter(result => result.extensionPlanCount === 0).length,
       largestRecoveredSetback: recoveredPlans.length
         ? Math.max(...recoveredPlans.map(plan => plan.maxSetback)) : null
     },
     strategyTotals,
+    failureBuckets,
+    failureSummaries: failed.map(result => ({
+      puzzle: result.puzzle,
+      stopReason: result.stopReason,
+      moves: result.moves,
+      finalCrossings: result.finalCrossings,
+      minimumCrossings: result.minimumCrossings,
+      extensionPlanCount: result.extensionPlanCount,
+      recoveredExtensionPlans: result.recoveredExtensionPlans,
+      buckets: result.failureBuckets,
+      finalMetrics: result.finalMetrics,
+      bestMetrics: result.bestMetrics,
+      searchDiagnostics: result.searchDiagnostics
+    })),
     longestSolves: solved.slice().sort((a, b) => b.moves - a.moves).slice(0, 10)
       .map(result => ({
         puzzle: result.puzzle,

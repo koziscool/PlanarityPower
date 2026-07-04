@@ -142,6 +142,56 @@ A change should not be considered a clear win just because it improves seed
 - does not add large move-count churn,
 - and has understandable strategy-level evidence explaining why it helped.
 
+## Current Frontier Benchmarks
+
+The 30-vertex benchmark is now mostly a regression check. Recent barrier-edge
+and region-extension changes pushed the current solver well past the old
+30-vertex baseline, so solve-rate deltas there are often saturated.
+
+Use larger graphs when evaluating new regime logic:
+
+```bash
+node benchmark-stage2.js 30 40 500 12345 --deterministic-clock
+node benchmark-stage2.js 20 50 600 12345 --deterministic-clock
+```
+
+For live iteration, use small batches first so failures are available while the
+idea is still fresh:
+
+```bash
+node benchmark-stage2.js 5 50 600 12345 --deterministic-clock
+node benchmark-stage2.js 5 50 600 1 --deterministic-clock
+node benchmark-stage2.js 5 50 600 2 --deterministic-clock
+```
+
+Small batches are not enough to prove solve-rate changes, but they are good for
+checking whether a new regime move is reducing the right failures or merely
+moving noise around.
+
+Interpretation:
+
+- `40v` is the late-stage/topology benchmark. Failures are often near-endgame
+  misses, so it is useful for barrier edge, triangle triage, contained
+  separator, polarity/inversion, and finisher work.
+- `50v` is the regime-transition benchmark. Failures still include high-crossing
+  stalls, missing nucleus creation/extension, and excessive escape churn, so it
+  is useful for deployment gates and structural progress before the final solve.
+
+`benchmark-stage2.js` now records compact live metric snapshots for failures:
+final/best/tail progress metrics, story metrics (`freeze`, `dwell`, `trend`,
+`thaw`, `drop`), regime metrics (`bulkReduction`, `nucleusBuilding`,
+`nucleusFraction`, `boundaryConcentration`, etc.), last structural-search
+diagnostics, and coarse `failureBuckets` such as:
+
+- `near-endgame`
+- `high-crossing-stall`
+- `no-extension-fired`
+- `extension-fired-but-not-enough`
+- `wasted-tail`
+- `random-escape-heavy`
+- `weak-nucleus`
+- `boundary-concentrated`
+
 ## Open Issue: Statistical Confidence
 
 A six-seed suite gives better signal than one seed, but it still has visible

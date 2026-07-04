@@ -92,15 +92,57 @@ Validated on 30-vertex graphs (n=150 cascades + real replays), stable:
 
 ---
 
+## 5. Regime metrics — `createRegimeState` + `computeRegimeMetrics(graph, analysis, storyMetrics, st)`
+
+**An assembly layer, not a new computation.** It composes existing signals
+(analysis + story metrics + a small nucleus-growth window) into a per-move answer
+to *"which regime(s) are we in?"* — so the algo can decide **what to optimize**.
+It is **descriptive, not predictive** (see the lifecycle note below). Computed
+live and stored on `solverState.regimeMetrics` so the algo can read it next step.
+
+The lifecycle has (at least) two objectives, and the metric describes membership
+in each — **allowed to overlap** (both high = the handoff/baton-exchange zone):
+
+| field | tag | meaning |
+|---|---|---|
+| **bulkReduction** | rollup | `crossingLoad` — how much crossing-soup remains. Heuristic, tunable. |
+| **nucleusBuilding** | rollup | `nucleusFraction·(0.5+0.5·solidity)` — how much *solid* nucleus there is to grow. Heuristic, tunable. |
+| `nucleusFraction` | graph-state / **independent** | largest clean region / N — the frame's size. |
+| `nucleusSolidity` | independent | region density (cheap O(E) proxy; full `establishedScore` available since the O(size³)→near-linear fix). |
+| `nucleusGrowth` | independent | nucleus fraction now − W moves ago (W=15). The regime *dynamic*. |
+| `boundaryConcentration` | independent | fraction of offenders sitting on the nucleus frontier — high ⇒ growing the nucleus resolves the crossings; low ⇒ scattered. |
+| `crossingLoad` | independent | crossings/(crossings+N). |
+| `edgeLengthSlack` | independent, **provisional/untested** | max relative edge length — proxy for "distance from barycentric equilibrium," i.e. reduction still available. Shipped unvalidated; quarantine its reputation. |
+| `freeze` / `dwell` / `trend` | **algo-DEPENDENT** | passed through from story — the "current runner has slowed" descriptor. |
+
+**Durability tags matter:** `nucleus*` / `boundaryConcentration` / `crossingLoad`
+/ `edgeLengthSlack` are properties of the *graph state* — they survive an algo
+rewrite. `freeze`/`dwell`/`trend` describe the *solver's behavior* and drift as
+the algo changes. Prefer the independent ones as the durable diagnostic axis.
+
+**Why descriptive, not predictive:** early nucleus behavior does NOT separate
+eventual-solve from eventual-fail (both crawl at low nucleus for the first half),
+and a "stalled" flag false-fires on ~3/4 of eventual solves. So regime metrics
+describe *where a solve is now* (answerable, robust) — they do **not** forecast
+its outcome (a coin flip, dominated by algo volatility). Use them to guide the
+*current objective*, not to predict.
+
+---
+
 ## Where each is computed
 
 | metric set | function | live? | file |
 |---|---|---|---|
 | progress | `computeProgressMetrics` | yes | solver.js |
 | story / cascade-state | `createStoryState` + `updateStoryMetrics` | yes (per move) | solver.js |
+| regime | `createRegimeState` + `computeRegimeMetrics` | yes (per move) | solver.js |
 | cascade onset | `findCascadeOnset` | no (retrospective) | annotate-history.js |
 
-Live wiring: `solver.html` updates story metrics in its `solverStep` wrapper
-(stored on `solverState` so the algo can read them next step) and shows a card
-row; `interactive.html` replays history through a story-state in `updateAnalysis`
-and shows a "Cascade state (live)" panel block.
+Live wiring: `solver.html` computes story + regime once per move in its
+`solverStep` wrapper (stored on `solverState` so the algo can read them next step,
+and on `puzzle._analysis` reused by the render) and shows card rows;
+`interactive.html` replays history through story + regime state in
+`updateAnalysis` (cached on history length) and shows "Cascade state (live)" and
+"Regime (live)" panel blocks; `annotate-history.js` recomputes both offline in its
+replay pass, so exported histories get `metrics.story` and `metrics.regime` per
+move (option A — no raw `moveEntry` bloat).

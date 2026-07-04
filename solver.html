@@ -143,6 +143,8 @@
     var computeProgressMetrics = Solver.computeProgressMetrics;
     var createStoryState = Solver.createStoryState;
     var updateStoryMetrics = Solver.updateStoryMetrics;
+    var createRegimeState = Solver.createRegimeState;
+    var computeRegimeMetrics = Solver.computeRegimeMetrics;
 
     function applySolverClock(reset) {
       var checkbox = document.getElementById('deterministic-clock');
@@ -364,7 +366,7 @@
       var metricsLine = '';
       if (analyzeGraphState && computeProgressMetrics && puzzle.status !== 'solved') {
         puzzle.solverState = puzzle.solverState || {};
-        var analysis = analyzeGraphState(puzzle.graph, puzzle.solverState);
+        var analysis = puzzle._analysis || analyzeGraphState(puzzle.graph, puzzle.solverState);
         var pm = computeProgressMetrics(puzzle.graph, analysis);
         puzzle.progressMetrics = pm;
         var sep = '<span class="sep">·</span>';
@@ -394,11 +396,26 @@
           metricItem('thaw', sm.thaw) + sep2 +
           metricItem('drop', sm.drop);
       }
+      // Regime row (live assembly). Computed per-move in solverStep.
+      var regimeLine = '';
+      var rm = puzzle.regimeMetrics;
+      if (rm && puzzle.status !== 'solved') {
+        var sep3 = '<span class="sep">·</span>';
+        var growStr = (rm.nucleusGrowth > 0 ? '+' : '') + rm.nucleusGrowth.toFixed(2);
+        regimeLine =
+          metricItem('bulk', rm.bulkReduction.toFixed(2)) + sep3 +
+          metricItem('nucleus', rm.nucleusBuilding.toFixed(2)) + sep3 +
+          metricItem('nuc-frac', Math.round(rm.nucleusFraction * 100) + '%') + sep3 +
+          metricItem('solidity', rm.nucleusSolidity.toFixed(2)) + sep3 +
+          metricItem('nuc-grow', growStr) + sep3 +
+          metricItem('bnd-conc', Math.round(rm.boundaryConcentration * 100) + '%');
+      }
       puzzle.header.innerHTML =
         '<div class="row"><span>' + statusInfo + '</span>' +
         '<span>' + (puzzle.lastStrategy || '-') + '</span></div>' +
         '<div class="row metrics-row"><span>' + metricsLine + '</span></div>' +
-        (storyLine ? '<div class="row metrics-row"><span>' + storyLine + '</span></div>' : '');
+        (storyLine ? '<div class="row metrics-row"><span>' + storyLine + '</span></div>' : '') +
+        (regimeLine ? '<div class="row metrics-row"><span>' + regimeLine + '</span></div>' : '');
       puzzle.header.title = 'Click puzzle to see history in console';
     }
     
@@ -481,12 +498,21 @@
         puzzle.history.push(moveEntry);
         puzzle.snapshots.push(snapshotPuzzle(puzzle, 'move', result));
 
-        // Live story/cascade-state metrics, kept on solverState so the algo can
-        // read them next step. Updated once per actual move (not per render).
-        if (updateStoryMetrics) {
+        // Live story + regime metrics, kept on solverState so the algo can read
+        // them next step. Computed once per actual move from one shared analysis
+        // (reused by the card render via puzzle._analysis).
+        if (updateStoryMetrics && analyzeGraphState) {
+          var liveAnalysis = analyzeGraphState(puzzle.graph, puzzle.solverState);
+          puzzle._analysis = liveAnalysis;
           puzzle.solverState.storyState = puzzle.solverState.storyState || createStoryState();
           puzzle.storyMetrics = updateStoryMetrics(
-            puzzle.graph, puzzle.solverState.storyState, null, puzzle.count);
+            puzzle.graph, puzzle.solverState.storyState,
+            liveAnalysis.crossingCounts, liveAnalysis.crossings);
+          if (computeRegimeMetrics) {
+            puzzle.solverState.regimeState = puzzle.solverState.regimeState || createRegimeState();
+            puzzle.regimeMetrics = computeRegimeMetrics(
+              puzzle.graph, liveAnalysis, puzzle.storyMetrics, puzzle.solverState.regimeState);
+          }
         }
 
         renderPuzzle(puzzle);

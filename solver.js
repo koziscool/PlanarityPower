@@ -692,14 +692,17 @@
     region.forEach(function(index) { regionSet[index] = true; });
     var internalEdges = [];
     var boundaryEdges = [];
-    var edgeMap = {};
+    var idx = new Map();
+    for (var ni = 0; ni < graph.nodes.length; ni++) idx.set(graph.nodes[ni], ni);
+    var adjSet = {};   // region-internal adjacency (deduped) for triangle finding
 
     graph.links.forEach(function(link) {
-      var a = graph.nodes.indexOf(link[0]);
-      var b = graph.nodes.indexOf(link[1]);
+      var a = idx.get(link[0]);
+      var b = idx.get(link[1]);
       if (regionSet[a] && regionSet[b]) {
         internalEdges.push([a, b]);
-        edgeMap[Math.min(a, b) + ',' + Math.max(a, b)] = true;
+        (adjSet[a] || (adjSet[a] = new Set())).add(b);
+        (adjSet[b] || (adjSet[b] = new Set())).add(a);
       } else if (regionSet[a] || regionSet[b]) {
         boundaryEdges.push([a, b]);
       }
@@ -735,15 +738,24 @@
     var visibilityRatio = medianEdgeLength > 1e-8
       ? medianNearestSpacing / medianEdgeLength : 0;
 
+    // Triangles = 3-cliques of internal edges. Enumerate via each vertex's
+    // region neighbors (common-neighbor test) — O(sum of squared degrees)
+    // instead of O(region^3). Counted once through the smallest vertex a<b<c.
     var triangleQualities = [];
-    for (var ai = 0; ai < region.length; ai++) {
-      for (var bi = ai + 1; bi < region.length; bi++) {
-        for (var ci = bi + 1; ci < region.length; ci++) {
-          var a = region[ai], b = region[bi], c = region[ci];
-          if (!edgeMap[Math.min(a, b) + ',' + Math.max(a, b)] ||
-              !edgeMap[Math.min(a, c) + ',' + Math.max(a, c)] ||
-              !edgeMap[Math.min(b, c) + ',' + Math.max(b, c)]) continue;
-          var pa = graph.nodes[a], pb = graph.nodes[b], pc = graph.nodes[c];
+    Object.keys(adjSet).forEach(function(aKey) {
+      var a = +aKey;
+      var neigh = [];
+      adjSet[a].forEach(function(x) { if (x > a) neigh.push(x); });
+      neigh.sort(function(p, q) { return p - q; });
+      var pa = graph.nodes[a];
+      for (var i = 0; i < neigh.length; i++) {
+        var b = neigh[i], setB = adjSet[b];
+        if (!setB) continue;
+        var pb = graph.nodes[b];
+        for (var j = i + 1; j < neigh.length; j++) {
+          var c = neigh[j];
+          if (!setB.has(c)) continue;   // need edge (b,c) too
+          var pc = graph.nodes[c];
           var ab2 = Math.pow(pa[0] - pb[0], 2) + Math.pow(pa[1] - pb[1], 2);
           var ac2 = Math.pow(pa[0] - pc[0], 2) + Math.pow(pa[1] - pc[1], 2);
           var bc2 = Math.pow(pb[0] - pc[0], 2) + Math.pow(pb[1] - pc[1], 2);
@@ -755,13 +767,13 @@
           }
         }
       }
-    }
+    });
 
     var dandelions = [];
     region.forEach(function(index) {
       var center = graph.nodes[index];
       var neighbors = getNeighbors(graph, center).filter(function(node) {
-        return regionSet[graph.nodes.indexOf(node)];
+        return regionSet[idx.get(node)];
       });
       if (neighbors.length < 7) return;
       var polar = neighbors.map(function(node) {
@@ -3079,6 +3091,84 @@
       trend: trend,
       thaw: thaw,
       drop: drop
+    };
+  }
+
+  // ===========================================================================
+  // SECTION: REGIME METRICS (assembly layer — "which regime(s) are we in?")
+  // Composes existing signals (analysis + story metrics) into a per-move
+  // description of lifecycle regime, so the algo can decide what to optimize.
+  // See METRICS.md. NOT a predictor. Rollups (bulkReduction/nucleusBuilding) are
+  // 0..1 and allowed to overlap — the overlap is the handoff zone.
+  //   Tags: nucleus* + boundaryConcentration + crossingLoad + edgeLengthSlack are
+  //   graph-state (algo-INDEPENDENT, durable); freeze/dwell/trend are the
+  //   algo-BEHAVIOR "current runner has slowed" descriptors (algo-DEPENDENT).
+  // ===========================================================================
+  function createRegimeState(window) {
+    return { W: window || 15, nucRing: [], move: 0 };
+  }
+
+  function computeRegimeMetrics(graph, analysis, storyMetrics, st) {
+    var N = graph.nodes.length;
+    st.move++;
+
+    var nucleusFraction = N > 0 ? (analysis.largestCleanRegion || 0) / N : 0;
+    var best = analysis.bestEstablishedRegion;
+    var nucleusSolidity = best ? (best.density || 0) : 0;   // cheap O(E) proxy
+
+    // nucleus growth over the trailing window W
+    st.nucRing.push(nucleusFraction);
+    if (st.nucRing.length > st.W + 1) st.nucRing.shift();
+    var nucleusGrowth = nucleusFraction - st.nucRing[0];
+
+    // boundary concentration: of the offenders, what fraction sit on the
+    // nucleus frontier (adjacent to a nucleus vertex)? high => growing the
+    // nucleus resolves the crossings; low => they're scattered elsewhere.
+    var crossingCounts = analysis.crossingCounts || [];
+    var nucleusSet = {};
+    if (best && best.vertices) best.vertices.forEach(function(v) { nucleusSet[v] = true; });
+    var frontier = {};
+    if (best && best.vertices && best.vertices.length) {
+      var idx = new Map();
+      for (var i = 0; i < N; i++) idx.set(graph.nodes[i], i);
+      graph.links.forEach(function(l) {
+        var a = idx.get(l[0]), b = idx.get(l[1]);
+        if (nucleusSet[a] && !nucleusSet[b]) frontier[b] = true;
+        else if (nucleusSet[b] && !nucleusSet[a]) frontier[a] = true;
+      });
+    }
+    var offenders = 0, boundaryOffenders = 0;
+    for (var v = 0; v < N; v++) {
+      if ((crossingCounts[v] || 0) > 0) { offenders++; if (frontier[v]) boundaryOffenders++; }
+    }
+    var boundaryConcentration = offenders > 0 ? boundaryOffenders / offenders : 0;
+
+    // bulk-reduction side
+    var crossings = analysis.crossings || 0;
+    var crossingLoad = crossings / (crossings + N);
+    var el = analysis.edgeLengthByDegree;
+    var edgeLengthSlack = el ? (el.maxRelativeLength || 0) : 0;   // provisional/untested
+
+    // heuristic rollups (tunable): both may be high => the handoff overlap zone
+    var bulkReduction = crossingLoad;
+    var nucleusBuilding = nucleusFraction * (0.5 + 0.5 * nucleusSolidity);
+
+    return {
+      bulkReduction: bulkReduction,
+      nucleusBuilding: nucleusBuilding,
+      // nucleus-building components (graph-state / algo-independent)
+      nucleusFraction: nucleusFraction,
+      nucleusSolidity: nucleusSolidity,
+      nucleusGrowth: nucleusGrowth,
+      boundaryConcentration: boundaryConcentration,
+      // bulk-reduction components
+      crossings: crossings,
+      crossingLoad: crossingLoad,
+      edgeLengthSlack: edgeLengthSlack,
+      // algo-behavior "runner slowed" descriptors (algo-dependent, from story)
+      freeze: storyMetrics ? storyMetrics.freeze : null,
+      dwell: storyMetrics ? storyMetrics.dwell : null,
+      trend: storyMetrics ? storyMetrics.trend : null
     };
   }
 
@@ -8241,6 +8331,8 @@
   exports.computeProgressMetrics = computeProgressMetrics;
   exports.createStoryState = createStoryState;
   exports.updateStoryMetrics = updateStoryMetrics;
+  exports.createRegimeState = createRegimeState;
+  exports.computeRegimeMetrics = computeRegimeMetrics;
   exports.analyzeEstablishedRegion = analyzeEstablishedRegion;
   exports.analyzeConflictRegions = analyzeConflictRegions;
   exports.suggestDirectionalPlans = suggestDirectionalPlans;

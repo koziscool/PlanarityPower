@@ -55,6 +55,7 @@ function annotateHistory(historyFile, outFile) {
   console.log(`Annotating ${history.length} positions from ${historyFile}`);
 
   const story = solver.createStoryState();   // single stateful forward pass
+  const regime = solver.createRegimeState ? solver.createRegimeState() : null;
   const crossingsSeries = [];
 
   const annotated = history.map((entry, idx) => {
@@ -63,6 +64,8 @@ function annotateHistory(historyFile, outFile) {
     const progress = solver.computeProgressMetrics(graph, analysis);
     const storyM = solver.updateStoryMetrics(
       graph, story, analysis.crossingCounts, analysis.crossings);
+    const regimeM = (regime && solver.computeRegimeMetrics)
+      ? solver.computeRegimeMetrics(graph, analysis, storyM, regime) : null;
     crossingsSeries.push(analysis.crossings);
 
     const metrics = Object.assign({}, progress, {
@@ -70,6 +73,7 @@ function annotateHistory(historyFile, outFile) {
       recentImprovement: analysis.recentImprovement,
       oscillatingVertices: (analysis.oscillatingVertices || []).length,
       story: storyM,
+      regime: regimeM,
     });
     if ((idx + 1) % 50 === 0) {
       console.log(`  ${idx + 1}/${history.length} (crossings=${metrics.crossings}, ` +

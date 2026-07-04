@@ -276,6 +276,8 @@
     var computeProgressMetrics = Solver.computeProgressMetrics;
     var createStoryState = Solver.createStoryState;
     var updateStoryMetrics = Solver.updateStoryMetrics;
+    var createRegimeState = Solver.createRegimeState;
+    var computeRegimeMetrics = Solver.computeRegimeMetrics;
 
     function applySolverClock(reset) {
       var checkbox = document.getElementById('deterministic-clock');
@@ -297,16 +299,20 @@
         return [nodes0.indexOf(l[0]), nodes0.indexOf(l[1])];
       });
       var st = createStoryState();
-      var sm = null;
+      var rst = createRegimeState ? createRegimeState() : null;
+      var sm = null, rm = null;
       for (var hi = 0; hi < puzzle.history.length; hi++) {
         var pos = puzzle.history[hi].positions;
         if (!pos) continue;
         var nodes = pos.map(function(p) { return [p[0], p[1]]; });
         var links = edgePairs.map(function(e) { return [nodes[e[0]], nodes[e[1]]]; });
-        sm = updateStoryMetrics({ nodes: nodes, links: links }, st,
-          null, puzzle.history[hi].crossings);
+        var g = { nodes: nodes, links: links };
+        var a = analyzeGraphState(g, {});
+        sm = updateStoryMetrics(g, st, a.crossingCounts, a.crossings);
+        if (computeRegimeMetrics && rst) rm = computeRegimeMetrics(g, a, sm, rst);
       }
       puzzle.storyMetrics = sm;
+      puzzle.regimeMetrics = rm;
       puzzle._storyHistLen = puzzle.history.length;
     }
     var suggestStage2Restart = Solver.suggestStage2Restart;
@@ -1490,7 +1496,7 @@
       var progressMetrics = computeProgressMetrics(puzzle.graph, analysis);
       puzzle.progressMetrics = progressMetrics;
       refreshStoryMetrics(puzzle);
-      updateBetaMetrics(analysis, progressMetrics, puzzle.storyMetrics);
+      updateBetaMetrics(analysis, progressMetrics, puzzle.storyMetrics, puzzle.regimeMetrics);
 
       document.getElementById('diagnosis').innerHTML =
         '<div>Crossings: ' + analysis.crossings + '</div>' +
@@ -1521,7 +1527,7 @@
       return analysis;
     }
 
-    function updateBetaMetrics(analysis, progress, story) {
+    function updateBetaMetrics(analysis, progress, story, regime) {
       var box = document.getElementById('beta-metrics');
       if (!box || !analysis || !analysis.edgeLengthByDegree) return;
       var edgeLength = analysis.edgeLengthByDegree;
@@ -1583,6 +1589,26 @@
           '<div class="metric-row"><span class="metric-label">Drop (max self-deconflict)</span>' +
             '<span class="metric-value">' + story.drop + '</span></div>';
       }
+      var regimeBlock = '';
+      if (regime) {
+        var rGrow = (regime.nucleusGrowth > 0 ? '+' : '') + regime.nucleusGrowth.toFixed(2);
+        regimeBlock =
+          '<div class="metrics-title" style="margin-top:8px;">Regime (live)</div>' +
+          '<div class="metric-row"><span class="metric-label">Bulk-reduction</span>' +
+            '<span class="metric-value">' + regime.bulkReduction.toFixed(2) + '</span></div>' +
+          '<div class="metric-row"><span class="metric-label">Nucleus-building</span>' +
+            '<span class="metric-value">' + regime.nucleusBuilding.toFixed(2) + '</span></div>' +
+          '<div class="metric-row"><span class="metric-label">Nucleus fraction</span>' +
+            '<span class="metric-value">' + Math.round(regime.nucleusFraction * 100) + '%</span></div>' +
+          '<div class="metric-row"><span class="metric-label">Nucleus solidity</span>' +
+            '<span class="metric-value">' + regime.nucleusSolidity.toFixed(2) + '</span></div>' +
+          '<div class="metric-row"><span class="metric-label">Nucleus growth (W)</span>' +
+            '<span class="metric-value">' + rGrow + '</span></div>' +
+          '<div class="metric-row"><span class="metric-label">Boundary concentration</span>' +
+            '<span class="metric-value">' + Math.round(regime.boundaryConcentration * 100) + '%</span></div>' +
+          '<div class="metric-row"><span class="metric-label">Edge-length slack (prov.)</span>' +
+            '<span class="metric-value">' + regime.edgeLengthSlack.toFixed(1) + '</span></div>';
+      }
       box.innerHTML =
         '<div class="metrics-title">Development Measurements</div>' +
         '<div class="metric-row"><span class="metric-label">Crossings</span>' +
@@ -1608,6 +1634,7 @@
           '</span></div>' +
         progressBlock +
         storyBlock +
+        regimeBlock +
         '<div class="metrics-title" style="margin-top:8px;">By Degree</div>' +
         buckets;
     }

@@ -61,6 +61,21 @@ moves respectively. That is promising, but not conclusive because solver
 randomness and wall-clock bounded searches still change trajectories between
 runs even when the graph batch is fixed.
 
+## Controller Layer
+
+`solver.js` now has a first-pass controller boundary. `solverStep(graph, state)`
+remains the compatibility API, but delegates to a default `SolverController`
+created by `createSolverController()`. The controller owns policy sequencing:
+initial step accounting, pending structural moves, pending finishers, and the
+named clean-anchor-break phase. The move generators and graph-analysis functions
+remain plain functions in the same file.
+
+This is intentionally incremental. The next useful extractions are controller
+methods for compaction, adaptive minimization, endgame triangle/barrier tools,
+region extension, wasted-tail interventions, high-crossing Stage 1c, and escape.
+The goal is to make parameter/gate experiments local to controller phases while
+preserving browser and benchmark compatibility.
+
 Follow-up cascade-trigger mining found that usable solved wasted-tail histories
 usually start their final cascade from an ordinary single-vertex adaptive move,
 not from an already-labeled structural tool. The common event is a large

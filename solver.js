@@ -7188,8 +7188,11 @@
   //
   // RETURNS: { done, improved, move, count, stuck?, wouldEscape? }
   //
-  function solverStep(graph, state) {
-    state = state || {};
+  function SolverController(options) {
+    this.options = options || {};
+  }
+
+  SolverController.prototype.initializeStep = function(graph, state) {
     state.totalMoves = (state.totalMoves || 0) + 1;
     var count = intersections(graph.links);
     if (state.bestCrossingCount === undefined || count < state.bestCrossingCount) {
@@ -7200,6 +7203,91 @@
     }
     recordCrossingHistory(state, count);
     updateStructuralPlan(state, count);
+    return count;
+  };
+
+  SolverController.prototype.applyMove = function(graph, state, count, move,
+      options) {
+    options = options || {};
+    move.node[0] = move.toX;
+    move.node[1] = move.toY;
+    recordMove(state, move.nodeIndex, move.toX, move.toY);
+    var newCount = intersections(graph.links);
+    move.improvement = count - newCount;
+    return {
+      done: false,
+      improved: options.improved === undefined
+        ? newCount < count : options.improved,
+      move: options.attachPlan === false ? move : attachStructuralPlan(state, move),
+      count: newCount
+    };
+  };
+
+  SolverController.prototype.tryPendingStructural = function(graph, state,
+      count) {
+    var move = takePendingStructuralMove(graph, state);
+    if (!move) return null;
+    return this.applyMove(graph, state, count, move, {
+      attachPlan: false
+    });
+  };
+
+  SolverController.prototype.tryPendingFinisher = function(graph, state,
+      count) {
+    var move = takePendingFinisherMove(graph, state);
+    if (!move) return null;
+    return this.applyMove(graph, state, count, move);
+  };
+
+  SolverController.prototype.tryCleanAnchorBreak = function(graph, state,
+      count) {
+    // A clean anchor break is a stronger signal than generic compaction: the
+    // crossed side has a clean stopping point, so a bounded component transfer
+    // can be completed and locally repaired before Stage 1 reacts to temporary
+    // motor-control crossings.
+    if (state.activeStructuralPlan || graph.nodes.length > 100 ||
+        count > 120 || state.movesSinceCrossingProgress < 8 ||
+        state.cleanAnchorBreakAttemptedAtBestCrossings ===
+          state.bestCrossingCount) {
+      return null;
+    }
+
+    state.cleanAnchorBreakAttemptedAtBestCrossings = state.bestCrossingCount;
+    var cleanAnchorBreakReport = profileSection(
+      'clean-anchor-break-barrier-search',
+      function() {
+        return suggestAnchorBreakBarrierTransfer(graph, {
+          timeBudgetMs: 250,
+          componentLimit: 40,
+          barrierLimit: 14,
+          cleanupSteps: 24,
+          keepCandidates: 6
+        });
+      });
+    state.lastAnchorBreakBarrierSearch = cleanAnchorBreakReport;
+    var cleanAnchorBreak = cleanAnchorBreakReport.best;
+    var hasCleanComponentBreak = cleanAnchorBreak &&
+      cleanAnchorBreak.cleanAnchorBreaks &&
+      cleanAnchorBreak.cleanAnchorBreaks.length > 0;
+    if (!hasCleanComponentBreak ||
+        cleanAnchorBreak.finalDamage !== 0 ||
+        cleanAnchorBreak.finalCrossings >= count) {
+      return null;
+    }
+
+    var cleanAnchorBreakResult = startAnchorBreakBarrierPlan(
+      graph, state, count, cleanAnchorBreak, cleanAnchorBreakReport);
+    return {
+      done: false,
+      improved: cleanAnchorBreakResult.improved,
+      move: cleanAnchorBreakResult.move,
+      count: cleanAnchorBreakResult.count
+    };
+  };
+
+  SolverController.prototype.step = function(graph, state) {
+    state = state || {};
+    var count = this.initializeStep(graph, state);
     
     if (count === 0) {
       return { done: true, count: 0 };
@@ -7209,72 +7297,16 @@
 
     // Complete a proven structural setup before allowing Stage 1 to react to
     // an intermediate position.
-    best = takePendingStructuralMove(graph, state);
-    if (best) {
-      best.node[0] = best.toX;
-      best.node[1] = best.toY;
-      recordMove(state, best.nodeIndex, best.toX, best.toY);
-      var newCount = intersections(graph.links);
-      best.improvement = count - newCount;
-      return { done: false, improved: newCount < count, move: best, count: newCount };
-    }
+    var pendingResult = this.tryPendingStructural(graph, state, count);
+    if (pendingResult) return pendingResult;
 
     // Complete an already accepted component relocation before allowing other
     // strategies to react to its intermediate geometry.
-    best = takePendingFinisherMove(graph, state);
-    if (best) {
-      best.node[0] = best.toX;
-      best.node[1] = best.toY;
-      recordMove(state, best.nodeIndex, best.toX, best.toY);
-      var newCount = intersections(graph.links);
-      best.improvement = count - newCount;
-      return {
-        done: false,
-        improved: newCount < count,
-        move: attachStructuralPlan(state, best),
-        count: newCount
-      };
-    }
+    pendingResult = this.tryPendingFinisher(graph, state, count);
+    if (pendingResult) return pendingResult;
 
-    // A clean anchor break is a stronger signal than generic compaction: the
-    // crossed side has a clean stopping point, so a bounded component transfer
-    // can be completed and locally repaired before Stage 1 reacts to temporary
-    // motor-control crossings.
-    if (!state.activeStructuralPlan && graph.nodes.length <= 100 &&
-        count <= 120 && state.movesSinceCrossingProgress >= 8 &&
-        state.cleanAnchorBreakAttemptedAtBestCrossings !==
-          state.bestCrossingCount) {
-      state.cleanAnchorBreakAttemptedAtBestCrossings =
-        state.bestCrossingCount;
-      var cleanAnchorBreakReport = profileSection(
-        'clean-anchor-break-barrier-search',
-        function() {
-          return suggestAnchorBreakBarrierTransfer(graph, {
-            timeBudgetMs: 250,
-            componentLimit: 40,
-            barrierLimit: 14,
-            cleanupSteps: 24,
-            keepCandidates: 6
-          });
-        });
-      state.lastAnchorBreakBarrierSearch = cleanAnchorBreakReport;
-      var cleanAnchorBreak = cleanAnchorBreakReport.best;
-      var hasCleanComponentBreak = cleanAnchorBreak &&
-        cleanAnchorBreak.cleanAnchorBreaks &&
-        cleanAnchorBreak.cleanAnchorBreaks.length > 0;
-      if (hasCleanComponentBreak &&
-          cleanAnchorBreak.finalDamage === 0 &&
-          cleanAnchorBreak.finalCrossings < count) {
-        var cleanAnchorBreakResult = startAnchorBreakBarrierPlan(
-          graph, state, count, cleanAnchorBreak, cleanAnchorBreakReport);
-        return {
-          done: false,
-          improved: cleanAnchorBreakResult.improved,
-          move: cleanAnchorBreakResult.move,
-          count: cleanAnchorBreakResult.count
-        };
-      }
-    }
+    var phaseResult = this.tryCleanAnchorBreak(graph, state, count);
+    if (phaseResult) return phaseResult;
 
     // One conservative compaction attempt per stalled crossing minimum. The
     // complete advance/repair schedule runs as a structural plan so Stage 1
@@ -7994,6 +8026,16 @@
     
     // Keep trying - return no move but don't give up yet
     return { done: false, improved: false, move: null, count: count };
+  };
+
+  function createSolverController(options) {
+    return new SolverController(options);
+  }
+
+  var defaultSolverController = createSolverController();
+
+  function solverStep(graph, state) {
+    return defaultSolverController.step(graph, state);
   }
   
   // Solve a puzzle completely (for benchmarking)
@@ -8556,6 +8598,7 @@
   exports.suggestCascadeTriggerMove = suggestCascadeTriggerMove;
   exports.findAdaptiveMinimizeMove = findAdaptiveMinimizeMove;
   exports.findReducingSideFlipMove = findReducingSideFlipMove;
+  exports.createSolverController = createSolverController;
   exports.minimizeStep = minimizeStep;
   exports.solverStep = solverStep;
   exports.solvePuzzle = solvePuzzle;

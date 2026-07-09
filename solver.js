@@ -2295,10 +2295,12 @@
   }
 
   function tryAnchorBreakEndpointRoomMoves(graph, barrier, component, targetSign,
-      margin) {
+      margin, ignoreComponentCrossings) {
     var barrierA = graph.nodes.indexOf(barrier[0]);
     var barrierB = graph.nodes.indexOf(barrier[1]);
     if (barrierA < 0 || barrierB < 0) return [];
+    var componentSet = {};
+    component.forEach(function(index) { componentSet[index] = true; });
 
     var edgeDx = barrier[1][0] - barrier[0][0];
     var edgeDy = barrier[1][1] - barrier[0][1];
@@ -2315,7 +2317,11 @@
     var simulation = cloneGraph(graph);
     var accepted = [];
     var baseTotal = intersections(simulation.links);
-    var steps = [margin * 1.2, margin * 2.0, margin * 3.0, 0.025, 0.04];
+    var outsideBase = countEndpointOutsideCrossings(
+      simulation, [barrierA, barrierB], componentSet);
+    var steps = ignoreComponentCrossings
+      ? [margin * 1.5, margin * 3.0, 0.025, 0.04, 0.06]
+      : [margin * 1.2, margin * 2.0, margin * 3.0, 0.025, 0.04];
 
     [barrierA, barrierB].forEach(function(index) {
       var original = graph.nodes[index];
@@ -2336,15 +2342,22 @@
         simulation.nodes[index][0] = x;
         simulation.nodes[index][1] = y;
         var counts = getCrossingCounts(simulation);
+        var outsideAfter = countEndpointOutsideCrossings(
+          simulation, [barrierA, barrierB], componentSet);
         var total = intersections(simulation.links);
         simulation.nodes[index][0] = beforeX;
         simulation.nodes[index][1] = beforeY;
 
-        if ((counts[barrierA] || 0) > (endpointBaseCounts[barrierA] || 0) ||
+        if (ignoreComponentCrossings) {
+          if (outsideAfter > outsideBase) return;
+        } else if (
+            (counts[barrierA] || 0) > (endpointBaseCounts[barrierA] || 0) ||
             (counts[barrierB] || 0) > (endpointBaseCounts[barrierB] || 0)) {
           return;
         }
-        var score = total - baseTotal - step * 0.01;
+        var score = ignoreComponentCrossings
+          ? outsideAfter - outsideBase - step * 0.08
+          : total - baseTotal - step * 0.01;
         if (!best || score < best.score) {
           best = {
             index: index,
@@ -2354,7 +2367,10 @@
             strategy: 'anchor-break-endpoint-room',
             endpointCrossingsBefore: endpointBaseCounts[index] || 0,
             endpointCrossingsAfter: counts[index] || 0,
+            outsideEndpointCrossingsBefore: outsideBase,
+            outsideEndpointCrossingsAfter: outsideAfter,
             totalCrossingsAfter: total,
+            roomStep: step,
             score: score
           };
         }
@@ -2364,6 +2380,8 @@
         simulation.nodes[index][0] = best.x;
         simulation.nodes[index][1] = best.y;
         baseTotal = intersections(simulation.links);
+        outsideBase = countEndpointOutsideCrossings(
+          simulation, [barrierA, barrierB], componentSet);
         accepted.push(best);
       }
     });
@@ -2371,8 +2389,31 @@
     return accepted;
   }
 
+  function countEndpointOutsideCrossings(graph, endpointIndices, componentSet) {
+    var endpointSet = {};
+    endpointIndices.forEach(function(index) { endpointSet[index] = true; });
+    var total = 0;
+    for (var i = 0; i < graph.links.length; i++) {
+      var link = graph.links[i];
+      var a = graph.nodes.indexOf(link[0]);
+      var b = graph.nodes.indexOf(link[1]);
+      if (!endpointSet[a] && !endpointSet[b]) continue;
+      for (var j = 0; j < graph.links.length; j++) {
+        if (i === j) continue;
+        var other = graph.links[j];
+        var c = graph.nodes.indexOf(other[0]);
+        var d = graph.nodes.indexOf(other[1]);
+        if (endpointSet[c] || endpointSet[d]) continue;
+        if (componentSet[c] || componentSet[d]) continue;
+        if (shareEndpoint(link, other)) continue;
+        if (intersect(link, other)) total++;
+      }
+    }
+    return total;
+  }
+
   function anchorBreakTransferPositions(graph, barrier, component, targetSign,
-      margin) {
+      margin, endpointRoomMode) {
     var simulation = cloneGraph(graph);
     var barrierA = graph.nodes.indexOf(barrier[0]);
     var barrierB = graph.nodes.indexOf(barrier[1]);
@@ -2388,8 +2429,12 @@
       return Math.abs(sideOfEdge(barrier, graph.nodes[a])) -
         Math.abs(sideOfEdge(barrier, graph.nodes[b]));
     });
-    var positions = tryAnchorBreakEndpointRoomMoves(
-      graph, barrier, component, targetSign, margin);
+    var positions = [];
+    if (endpointRoomMode !== false) {
+      positions = tryAnchorBreakEndpointRoomMoves(
+        graph, barrier, component, targetSign, margin,
+        endpointRoomMode === 'outside');
+    }
     positions.forEach(function(position) {
       simulation.nodes[position.index][0] = position.x;
       simulation.nodes[position.index][1] = position.y;
@@ -2538,7 +2583,9 @@
 
           var transfer = anchorBreakTransferPositions(
             graph, barrier, component, -sourceSign,
-            options.margin === undefined ? 0.005 : options.margin);
+            options.margin === undefined ? 0.005 : options.margin,
+            options.endpointRoomMode === undefined
+              ? 'strict' : options.endpointRoomMode);
           if (!transfer) {
             rejected.push({
               barrier: [barrierA, barrierB],
@@ -3014,8 +3061,6 @@
       lastAnchorBreakBarrierSearch: state.lastAnchorBreakBarrierSearch || null,
       lastCascadeTriggerSearch: state.lastCascadeTriggerSearch || null,
       lastMinimizeAttempt: state.lastMinimizeAttempt || null,
-      lastSideFlipAttempt: state.lastSideFlipAttempt || null,
-      sideFlipMoves: state.sideFlipMoves || 0
     };
   }
 
@@ -3436,6 +3481,364 @@
       if (Math.sqrt(dx * dx + dy * dy) < spacing) return false;
     }
     return true;
+  }
+
+  function triangleBoundaryCrossingsForPositions(graph, triangleVertices,
+      positions) {
+    var nodes = graph.nodes.map(function(node, index) {
+      var position = positions && positions[index] ? positions[index] : node;
+      return [position[0], position[1]];
+    });
+    var triangleSet = {};
+    triangleVertices.forEach(function(index) { triangleSet[index] = true; });
+    var triangleEdges = [
+      [nodes[triangleVertices[0]], nodes[triangleVertices[1]]],
+      [nodes[triangleVertices[1]], nodes[triangleVertices[2]]],
+      [nodes[triangleVertices[2]], nodes[triangleVertices[0]]]
+    ];
+    var count = 0;
+    for (var i = 0; i < graph.links.length; i++) {
+      var linkA = graph.nodes.indexOf(graph.links[i][0]);
+      var linkB = graph.nodes.indexOf(graph.links[i][1]);
+      if (triangleSet[linkA] && triangleSet[linkB]) continue;
+      var link = [nodes[linkA], nodes[linkB]];
+      for (var edgeIndex = 0; edgeIndex < triangleEdges.length; edgeIndex++) {
+        if (shareEndpoint(link, triangleEdges[edgeIndex])) continue;
+        if (intersect(link, triangleEdges[edgeIndex])) count++;
+      }
+    }
+    return count;
+  }
+
+  function trianglePointFromWeights(points, weights) {
+    return [
+      points[0][0] * weights[0] + points[1][0] * weights[1] +
+        points[2][0] * weights[2],
+      points[0][1] * weights[0] + points[1][1] * weights[1] +
+        points[2][1] * weights[2]
+    ];
+  }
+
+  function triangleSideDistance(point, a, b) {
+    var dx = b[0] - a[0];
+    var dy = b[1] - a[1];
+    var lengthSq = dx * dx + dy * dy;
+    if (lengthSq < 1e-12) return Infinity;
+    var t = ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / lengthSq;
+    t = Math.max(0, Math.min(1, t));
+    var px = a[0] + dx * t;
+    var py = a[1] + dy * t;
+    var ddx = point[0] - px;
+    var ddy = point[1] - py;
+    return Math.sqrt(ddx * ddx + ddy * ddy);
+  }
+
+  function triangleTriageTargets(graph, triangleVertices) {
+    var points = triangleVertices.map(function(index) { return graph.nodes[index]; });
+    var targets = [];
+    var sidePairs = [[0, 1, 2], [1, 2, 0], [2, 0, 1]];
+    var sideOffsets = [0.08, 0.14, 0.22, 0.32];
+    var sidePositions = [0.18, 0.32, 0.5, 0.68, 0.82];
+
+    sidePairs.forEach(function(side) {
+      var a = side[0];
+      var b = side[1];
+      var opposite = side[2];
+      sideOffsets.forEach(function(offset) {
+        sidePositions.forEach(function(t) {
+          var weights = [0, 0, 0];
+          weights[a] = (1 - offset) * (1 - t);
+          weights[b] = (1 - offset) * t;
+          weights[opposite] = offset;
+          targets.push({
+            point: trianglePointFromWeights(points, weights),
+            kind: 'side',
+            side: [triangleVertices[a], triangleVertices[b]],
+            corner: null,
+            depth: offset,
+            t: t
+          });
+        });
+      });
+    });
+
+    for (var corner = 0; corner < 3; corner++) {
+      var otherA = (corner + 1) % 3;
+      var otherB = (corner + 2) % 3;
+      [0.08, 0.14, 0.22, 0.3].forEach(function(depth) {
+        [[0.5, 0.5], [0.68, 0.32], [0.32, 0.68]].forEach(function(split) {
+          var weights = [0, 0, 0];
+          weights[corner] = 1 - depth;
+          weights[otherA] = depth * split[0];
+          weights[otherB] = depth * split[1];
+          targets.push({
+            point: trianglePointFromWeights(points, weights),
+            kind: 'corner',
+            side: null,
+            corner: triangleVertices[corner],
+            depth: depth,
+            t: split[0]
+          });
+        });
+      });
+    }
+    return targets.filter(function(target) {
+      return pointInTriangle(target.point, points[0], points[1], points[2]);
+    });
+  }
+
+  function uniqueVertexSet(vertices) {
+    var seen = {};
+    var result = [];
+    vertices.forEach(function(index) {
+      if (seen[index]) return;
+      seen[index] = true;
+      result.push(index);
+    });
+    return result;
+  }
+
+  function triangleTriageVertexSets(graph, triangle, options) {
+    var triangleSet = {};
+    triangle.vertices.forEach(function(index) { triangleSet[index] = true; });
+    var triPoints = triangle.vertices.map(function(index) { return graph.nodes[index]; });
+    var crossingCounts = getCrossingCounts(graph);
+    var maxVertices = options.maxVertices || 18;
+    var sets = [];
+
+    function addSet(vertices, label) {
+      vertices = uniqueVertexSet(vertices.filter(function(index) {
+        return !triangleSet[index];
+      }));
+      if (vertices.length === 0 || vertices.length > maxVertices) return;
+      var key = componentKey(vertices);
+      if (sets.some(function(item) { return item.key === key; })) return;
+      sets.push({ vertices: vertices, label: label, key: key });
+    }
+
+    triangle.components.forEach(function(component) {
+      if (component.side === 'inside' || component.side === 'straddling') {
+        addSet(component.vertices.filter(function(index) {
+          return pointInTriangle(graph.nodes[index],
+            triPoints[0], triPoints[1], triPoints[2]);
+        }), component.side + '-component');
+      }
+    });
+
+    var inside = [];
+    for (var i = 0; i < graph.nodes.length; i++) {
+      if (triangleSet[i]) continue;
+      if (pointInTriangle(graph.nodes[i], triPoints[0], triPoints[1], triPoints[2])) {
+        inside.push(i);
+      }
+    }
+    addSet(inside, 'all-geometric-inside');
+
+    var crossingInside = inside.filter(function(index) {
+      return graph.nodes[index].intersection || crossingCounts[index] > 0;
+    });
+    addSet(crossingInside, 'crossing-inside');
+
+    var nearCrossingInside = crossingInside.slice();
+    crossingInside.forEach(function(index) {
+      getNeighbors(graph, graph.nodes[index]).forEach(function(neighbor) {
+        var neighborIndex = graph.nodes.indexOf(neighbor);
+        if (inside.indexOf(neighborIndex) >= 0) nearCrossingInside.push(neighborIndex);
+      });
+    });
+    addSet(nearCrossingInside, 'crossing-neighborhood-inside');
+
+    if (crossingInside.length > maxVertices) {
+      addSet(crossingInside.sort(function(a, b) {
+        return crossingCounts[b] - crossingCounts[a];
+      }).slice(0, maxVertices), 'crossing-inside-top');
+    }
+    return sets;
+  }
+
+  function assignTriangleTriagePositions(graph, triangleVertices, vertices,
+      targets, mode) {
+    var triPoints = triangleVertices.map(function(index) { return graph.nodes[index]; });
+    var positions = [];
+    var used = {};
+    var ordered = vertices.slice();
+
+    if (mode.kind === 'side') {
+      var sideA = graph.nodes[mode.side[0]];
+      var sideB = graph.nodes[mode.side[1]];
+      var dx = sideB[0] - sideA[0];
+      var dy = sideB[1] - sideA[1];
+      var lengthSq = dx * dx + dy * dy || 1;
+      ordered.sort(function(a, b) {
+        var ta = ((graph.nodes[a][0] - sideA[0]) * dx +
+          (graph.nodes[a][1] - sideA[1]) * dy) / lengthSq;
+        var tb = ((graph.nodes[b][0] - sideA[0]) * dx +
+          (graph.nodes[b][1] - sideA[1]) * dy) / lengthSq;
+        return ta - tb;
+      });
+    } else if (mode.kind === 'corner') {
+      var cornerPoint = graph.nodes[mode.corner];
+      ordered.sort(function(a, b) {
+        var da = Math.pow(graph.nodes[a][0] - cornerPoint[0], 2) +
+          Math.pow(graph.nodes[a][1] - cornerPoint[1], 2);
+        var db = Math.pow(graph.nodes[b][0] - cornerPoint[0], 2) +
+          Math.pow(graph.nodes[b][1] - cornerPoint[1], 2);
+        return da - db;
+      });
+    }
+
+    ordered.forEach(function(index, order) {
+      var source = graph.nodes[index];
+      var filteredTargets = targets.filter(function(target) {
+        if (mode.kind === 'side') {
+          return target.kind === 'side' &&
+            target.side[0] === mode.side[0] && target.side[1] === mode.side[1];
+        }
+        if (mode.kind === 'corner') {
+          return target.kind === 'corner' && target.corner === mode.corner;
+        }
+        return true;
+      });
+      if (mode.kind === 'nearest') {
+        filteredTargets.sort(function(a, b) {
+          var da = Math.pow(source[0] - a.point[0], 2) +
+            Math.pow(source[1] - a.point[1], 2);
+          var db = Math.pow(source[0] - b.point[0], 2) +
+            Math.pow(source[1] - b.point[1], 2);
+          return da - db || a.depth - b.depth;
+        });
+      } else {
+        filteredTargets.sort(function(a, b) {
+          return Math.abs((a.t || 0.5) - ((order + 1) / (ordered.length + 1))) -
+            Math.abs((b.t || 0.5) - ((order + 1) / (ordered.length + 1))) ||
+            a.depth - b.depth;
+        });
+      }
+      for (var i = 0; i < filteredTargets.length; i++) {
+        var point = filteredTargets[i].point;
+        var key = Math.round(point[0] * 10000) + ',' + Math.round(point[1] * 10000);
+        if (used[key]) continue;
+        if (!pointInTriangle(point, triPoints[0], triPoints[1], triPoints[2])) continue;
+        used[key] = true;
+        positions.push({ index: index, x: point[0], y: point[1] });
+        return;
+      }
+    });
+    return positions.length === vertices.length ? positions : null;
+  }
+
+  function suggestTriangleTriage(graph, options) {
+    options = options || {};
+    var startedAt = now();
+    var timeBudgetMs = options.timeBudgetMs || 500;
+    var baseCrossings = intersections(graph.links);
+    if (baseCrossings === 0) {
+      return {
+        type: 'triangle-triage-search',
+        baseCrossings: 0,
+        candidatesTested: 0,
+        best: null,
+        candidates: []
+      };
+    }
+
+    var cleanupSteps = options.cleanupSteps === undefined
+      ? 80 : options.cleanupSteps;
+    var triangleLimit = options.triangleLimit || 80;
+    var candidateLimit = options.candidateLimit || 400;
+    var boundarySlack = options.boundarySlack === undefined ? 0 : options.boundarySlack;
+    var triangles = findSeparatingTriangles(graph).slice(0, triangleLimit);
+    var candidates = [];
+    var tested = 0;
+
+    for (var ti = 0; ti < triangles.length &&
+        tested < candidateLimit && now() - startedAt < timeBudgetMs; ti++) {
+      var triangle = triangles[ti];
+      if (triangle.boundaryCrossings > (options.triangleBoundaryLimit || 3)) continue;
+      var baseBoundaryCrossings = triangleBoundaryCrossingsForPositions(
+        graph, triangle.vertices, null);
+      var vertexSets = triangleTriageVertexSets(graph, triangle, options);
+      var targets = triangleTriageTargets(graph, triangle.vertices);
+      var modes = [{ kind: 'nearest' }];
+      [[triangle.vertices[0], triangle.vertices[1]],
+       [triangle.vertices[1], triangle.vertices[2]],
+       [triangle.vertices[2], triangle.vertices[0]]].forEach(function(side) {
+        modes.push({ kind: 'side', side: side });
+      });
+      triangle.vertices.forEach(function(vertex) {
+        modes.push({ kind: 'corner', corner: vertex });
+      });
+
+      for (var vsi = 0; vsi < vertexSets.length &&
+          tested < candidateLimit && now() - startedAt < timeBudgetMs; vsi++) {
+        var vertexSet = vertexSets[vsi];
+        for (var mi = 0; mi < modes.length &&
+            tested < candidateLimit && now() - startedAt < timeBudgetMs; mi++) {
+          var mode = modes[mi];
+          var positions = assignTriangleTriagePositions(
+            graph, triangle.vertices, vertexSet.vertices, targets, mode);
+          if (!positions) continue;
+          var positionMap = {};
+          positions.forEach(function(position) {
+            positionMap[position.index] = [position.x, position.y];
+          });
+          var boundaryAfter = triangleBoundaryCrossingsForPositions(
+            graph, triangle.vertices, positionMap);
+          tested++;
+          if (boundaryAfter > baseBoundaryCrossings + boundarySlack) continue;
+
+          var simulation = cloneGraph(graph);
+          applyGroupPositions(simulation, positions);
+          var immediateCrossings = intersections(simulation.links);
+          var rollout = stage1Rollout(simulation, cleanupSteps);
+          var finalCrossings = rollout.finalCrossings;
+          var downstreamImprovement = baseCrossings - finalCrossings;
+          var immediateDamage = Math.max(0, immediateCrossings - baseCrossings);
+          var score = downstreamImprovement * 100 -
+            Math.max(0, boundaryAfter - baseBoundaryCrossings) * 1000 -
+            immediateDamage * 0.2 - vertexSet.vertices.length;
+
+          candidates.push({
+            type: 'triangle-triage',
+            strategy: 'stage3-triangle-triage',
+            triangle: triangle.vertices,
+            component: vertexSet.vertices,
+            componentSource: vertexSet.label,
+            mode: mode.kind,
+            side: mode.side || null,
+            corner: mode.corner === undefined ? null : mode.corner,
+            positions: positions,
+            baseCrossings: baseCrossings,
+            baseBoundaryCrossings: baseBoundaryCrossings,
+            boundaryCrossingsAfterSetup: boundaryAfter,
+            immediateCrossings: immediateCrossings,
+            immediateDamage: immediateDamage,
+            finalCrossings: finalCrossings,
+            downstreamImprovement: downstreamImprovement,
+            cleanupSteps: rollout.moves.length,
+            cleanupMoves: rollout.moves,
+            score: score
+          });
+        }
+      }
+    }
+
+    candidates.sort(function(a, b) {
+      return b.score - a.score ||
+        a.finalCrossings - b.finalCrossings ||
+        a.component.length - b.component.length;
+    });
+    return {
+      type: 'triangle-triage-search',
+      baseCrossings: baseCrossings,
+      trianglesInspected: triangles.length,
+      candidatesTested: tested,
+      elapsedMs: now() - startedAt,
+      timedOut: now() - startedAt >= timeBudgetMs,
+      best: candidates.length > 0 && candidates[0].downstreamImprovement > 0
+        ? candidates[0] : null,
+      candidates: candidates.slice(0, 8)
+    };
   }
 
   // When a clean separating triangle contains every remaining crossing, the
@@ -6073,12 +6476,20 @@
   }
   
   // Record a move in recent history
+  // Single per-move choke point. Every committed move flows through here, so it
+  // is the one place to hang move-level logistics: a consumer sets state.onMove
+  // and gets called once per individual move (JSON frame, DOM update, metrics),
+  // independent of whether the strategy that produced it was one-move or
+  // multi-move. Guarded so existing behavior is unchanged when onMove is unset.
   function recordMove(state, nodeIndex, x, y) {
     state.recentMoves = state.recentMoves || [];
     state.recentMoves.push({ nodeIndex: nodeIndex, x: x, y: y });
     // Keep last 20 moves
     if (state.recentMoves.length > 20) {
       state.recentMoves.shift();
+    }
+    if (typeof state.onMove === 'function') {
+      state.onMove(nodeIndex, x, y, state);
     }
   }
   
@@ -6210,15 +6621,8 @@
     };
   }
 
-  // Focused Stage 1 descent. Two disjoint candidate lists per call:
-  //   - Main list: top 18 by score, cheap probe (centroid + half + 3 local + 1 random).
-  //   - Big list: top 12 by score, expensive probe (centroid + half + 8 local
-  //     + 5 random). Fires once every `bigListInterval` calls (default 8).
-  // The same score (crossings*2 + crossings/degree - repeatPenalty) ranks
-  // both lists; the big list takes the top slice, the main list takes the
-  // next slice. A random angle is sampled per call and shared by both lists'
-  // local probes. Short-circuit on strongImprovement resets the big-list
-  // counter so we don't fire it again until we're back in slow-grind.
+  // Focused Stage 1 descent. The main pass is intentionally cheap. An
+  // off-by-default long-edge fallback is retained for targeted experiments.
   function findAdaptiveMinimizeMove(graph, state, options) {
     state = state || {};
     options = options || {};
@@ -6226,9 +6630,10 @@
     var count = intersections(graph.links);
     if (count === 0) return null;
 
-    var bigListLimit = options.bigListLimit || 12;
     var mainListLimit = options.mainListLimit || 18;
-    var bigListInterval = options.bigListInterval || 8;
+    var wideListLimit = options.wideListLimit || 12;
+    var wideListInterval = options.wideListInterval || 8;
+    var wideListMinVertices = options.wideListMinVertices || 70;
     var strongImprovement = options.strongImprovement ||
       Math.max(3, Math.ceil(count * 0.03));
 
@@ -6253,8 +6658,6 @@
     }
     ranked.sort(function(a, b) { return b.score - a.score; });
 
-    // Big list temporarily disabled — main list draws from the full top of
-    // the ranked pool. runDescentPass + big-list spec retained for re-enable.
     var mainList = ranked.slice(0, mainListLimit);
 
     var theta = options.theta === undefined
@@ -6278,6 +6681,66 @@
       randomSamples: 1,
       strategyPrefix: 'adaptive-'
     });
+    var wideResult = null;
+    var wideListRan = false;
+    var wideListEnabled = options.enableWideList === undefined
+      ? false
+      : !!options.enableWideList;
+    state.adaptiveWideListCounter = (state.adaptiveWideListCounter || 0) + 1;
+    var shouldRunWideList = wideListEnabled &&
+      graph.nodes.length >= wideListMinVertices &&
+      result.bestImprovement < strongImprovement &&
+      ((state.movesSinceCrossingProgress || 0) >= 8 ||
+       state.adaptiveWideListCounter >= wideListInterval ||
+       !result.move);
+
+    if (shouldRunWideList) {
+      var linkLengths = graph.links.map(function(link) {
+        var dx = link[0][0] - link[1][0];
+        var dy = link[0][1] - link[1][1];
+        return Math.sqrt(dx * dx + dy * dy);
+      });
+      var medianLinkLength = median(linkLengths) || 1;
+      ranked.forEach(function(item) {
+        var incidentEdges = getNodeEdges(graph, item.node);
+        var lengthSum = 0;
+        var maxLength = 0;
+        for (var e = 0; e < incidentEdges.length; e++) {
+          var edge = incidentEdges[e];
+          var ex = edge[0][0] - edge[1][0];
+          var ey = edge[0][1] - edge[1][1];
+          var edgeLength = Math.sqrt(ex * ex + ey * ey);
+          lengthSum += edgeLength;
+          maxLength = Math.max(maxLength, edgeLength);
+        }
+        var avgLength = incidentEdges.length ? lengthSum / incidentEdges.length : 0;
+        var lengthPressure = Math.max(avgLength, maxLength * 0.75) /
+          medianLinkLength;
+        item.lengthScore = item.crossings *
+          Math.min(4, Math.max(0.5, lengthPressure)) /
+          Math.sqrt(Math.max(1, item.degree));
+      });
+      var lengthList = ranked.slice().sort(function(a, b) {
+        return b.lengthScore - a.lengthScore;
+      }).slice(0, wideListLimit);
+      wideResult = runDescentPass(ctx, lengthList, {
+        centroid: true,
+        half: true,
+        localDirs: 4,
+        randomSamples: 1,
+        strategyPrefix: 'adaptive-long-'
+      });
+      wideListRan = true;
+      state.adaptiveWideListCounter = 0;
+      if (wideResult.move &&
+          (!result.move || wideResult.bestImprovement > result.bestImprovement)) {
+        listKind = 'long-edge';
+        candidatesUsed = lengthList;
+        result = wideResult;
+      }
+    } else if (result.bestImprovement >= strongImprovement) {
+      state.adaptiveWideListCounter = 0;
+    }
 
     var attempt = {
       crossingCount: count,
@@ -6286,6 +6749,9 @@
       positionsTested: result.positionsTested,
       deterministicTested: result.deterministicTested,
       randomTested: result.randomTested,
+      wideListRan: wideListRan,
+      wideListBestImprovement: wideResult ? wideResult.bestImprovement : null,
+      wideListPositionsTested: wideResult ? wideResult.positionsTested : 0,
       strongImprovementTarget: strongImprovement,
       bestImprovement: result.bestImprovement,
       theta: theta,
@@ -6299,6 +6765,8 @@
       kind: listKind,
       candidates: candidatesUsed.length,
       positionsTested: result.positionsTested,
+      wideListRan: wideListRan,
+      wideListPositionsTested: wideResult ? wideResult.positionsTested : 0,
       foundMove: !!result.move,
       improvement: result.bestImprovement,
       crossingsBefore: count
@@ -6954,209 +7422,6 @@
     return best;
   }
 
-  // Stage 1b: low-degree "sore thumb" vertices often sit on the wrong side of
-  // an edge between two of their neighbors. Test only those topologically
-  // motivated side flips and accept only immediate crossing reductions.
-  function findReducingSideFlipMove(graph, state, options) {
-    state = state || {};
-    options = options || {};
-    var count = intersections(graph.links);
-    if (count === 0) return null;
-    state.sideFlipVertices = state.sideFlipVertices || {};
-    if ((state.sideFlipMoves || 0) >= (options.moveLimit || 4)) return null;
-
-    var crossingCounts = getCrossingCounts(graph);
-    var adjacency = graph.nodes.map(function() { return {}; });
-    for (var i = 0; i < graph.links.length; i++) {
-      var a = graph.nodes.indexOf(graph.links[i][0]);
-      var b = graph.nodes.indexOf(graph.links[i][1]);
-      if (a === b) continue;
-      adjacency[a][b] = true;
-      adjacency[b][a] = true;
-    }
-
-    var candidates = crossingCounts.map(function(crossings, index) {
-      var neighbors = Object.keys(adjacency[index]).map(Number);
-      var averageLength = 0;
-      neighbors.forEach(function(neighborIndex) {
-        var dx = graph.nodes[index][0] - graph.nodes[neighborIndex][0];
-        var dy = graph.nodes[index][1] - graph.nodes[neighborIndex][1];
-        averageLength += Math.sqrt(dx * dx + dy * dy);
-      });
-      return {
-        index: index,
-        crossings: crossings,
-        neighbors: neighbors,
-        degree: neighbors.length,
-        score: averageLength / Math.max(1, neighbors.length) +
-          crossings / Math.max(1, neighbors.length) * 0.02
-      };
-    }).filter(function(item) {
-      return item.crossings > 0 && item.degree >= 2 && item.degree <= 5 &&
-        !state.sideFlipVertices[item.index];
-    }).sort(function(a, b) {
-      return b.score - a.score;
-    }).slice(0, options.candidateLimit || 6);
-
-    var best = null;
-    var testedEdges = 0;
-    var testedPositions = 0;
-
-    for (var ci = 0; ci < candidates.length; ci++) {
-      var candidate = candidates[ci];
-      var node = graph.nodes[candidate.index];
-      var nodeEdges = getNodeEdges(graph, node);
-      var incidentBefore = countEdgeCrossings(graph, nodeEdges);
-
-      for (var ni = 0; ni < candidate.neighbors.length; ni++) {
-        for (var nj = ni + 1; nj < candidate.neighbors.length; nj++) {
-          var neighborA = candidate.neighbors[ni];
-          var neighborB = candidate.neighbors[nj];
-          if (!adjacency[neighborA][neighborB]) continue;
-          testedEdges++;
-
-          var edge = [graph.nodes[neighborA], graph.nodes[neighborB]];
-          var vertexSide = sideOfEdge(edge, node);
-          var sameSide = 0;
-          var oppositeSide = 0;
-          for (var otherIndex = 0; otherIndex < candidate.neighbors.length; otherIndex++) {
-            var otherNeighbor = candidate.neighbors[otherIndex];
-            if (otherNeighbor === neighborA || otherNeighbor === neighborB) continue;
-            var otherSide = sideOfEdge(edge, graph.nodes[otherNeighbor]);
-            if (Math.abs(vertexSide) < 1e-8 || Math.abs(otherSide) < 1e-8) continue;
-            if (vertexSide * otherSide > 0) sameSide++;
-            else oppositeSide++;
-          }
-          // Degree-2 vertices have only one possible neighbor edge. For higher
-          // degree vertices, require evidence that the vertex is the outlier.
-          if (candidate.degree > 2 && oppositeSide <= sameSide) continue;
-
-          var edgeLength = Math.sqrt(
-            Math.pow(edge[1][0] - edge[0][0], 2) +
-            Math.pow(edge[1][1] - edge[0][1], 2));
-          var offsets = [
-            Math.max(0.012, Math.min(0.04, edgeLength * 0.08)),
-            Math.max(0.025, Math.min(0.08, edgeLength * 0.16))
-          ];
-
-          for (var oi = 0; oi < offsets.length; oi++) {
-            var target = reflectPointAcrossEdge(node, edge, offsets[oi]);
-            if (!target || isTooClose(graph, node, target[0], target[1]) ||
-                wouldOscillate(state, candidate.index, target[0], target[1])) {
-              continue;
-            }
-            testedPositions++;
-
-            var oldX = node[0], oldY = node[1];
-            node[0] = target[0];
-            node[1] = target[1];
-            var incidentAfter = countEdgeCrossings(graph, nodeEdges);
-            node[0] = oldX;
-            node[1] = oldY;
-            var improvement = incidentBefore - incidentAfter;
-
-            if (improvement > 0 && (!best || improvement > best.improvement)) {
-              best = {
-                node: node,
-                nodeIndex: candidate.index,
-                fromX: oldX,
-                fromY: oldY,
-                toX: target[0],
-                toY: target[1],
-                improvement: improvement,
-                strategy: 'stage1b-neighbor-edge-flip',
-                search: {
-                  crossingCount: count,
-                  candidateVertices: candidates.map(function(item) { return item.index; }),
-                  testedEdges: testedEdges,
-                  testedPositions: testedPositions,
-                  neighborEdge: [neighborA, neighborB],
-                  degree: candidate.degree,
-                  incidentCrossingsBefore: incidentBefore,
-                  incidentCrossingsAfter: incidentAfter,
-                  bestImprovement: improvement
-                }
-              };
-            }
-          }
-        }
-      }
-
-      // If three neighbors form a triangle, test placing the sore-thumb
-      // vertex inside that local enclosure. This can cross multiple boundary
-      // edges at once and matches the common visual "belongs in here" move.
-      for (var ta = 0; ta < candidate.neighbors.length; ta++) {
-        for (var tb = ta + 1; tb < candidate.neighbors.length; tb++) {
-          for (var tc = tb + 1; tc < candidate.neighbors.length; tc++) {
-            var triangleA = candidate.neighbors[ta];
-            var triangleB = candidate.neighbors[tb];
-            var triangleC = candidate.neighbors[tc];
-            if (!adjacency[triangleA][triangleB] ||
-                !adjacency[triangleA][triangleC] ||
-                !adjacency[triangleB][triangleC]) {
-              continue;
-            }
-            var targetX = (graph.nodes[triangleA][0] + graph.nodes[triangleB][0] +
-              graph.nodes[triangleC][0]) / 3;
-            var targetY = (graph.nodes[triangleA][1] + graph.nodes[triangleB][1] +
-              graph.nodes[triangleC][1]) / 3;
-            if (pointInTriangle(node, graph.nodes[triangleA], graph.nodes[triangleB],
-                graph.nodes[triangleC]) ||
-                isTooClose(graph, node, targetX, targetY) ||
-                wouldOscillate(state, candidate.index, targetX, targetY)) {
-              continue;
-            }
-            testedPositions++;
-
-            var oldX = node[0], oldY = node[1];
-            node[0] = targetX;
-            node[1] = targetY;
-            var incidentAfter = countEdgeCrossings(graph, nodeEdges);
-            node[0] = oldX;
-            node[1] = oldY;
-            var improvement = incidentBefore - incidentAfter;
-
-            if (improvement > 0 && (!best || improvement > best.improvement)) {
-              best = {
-                node: node,
-                nodeIndex: candidate.index,
-                fromX: oldX,
-                fromY: oldY,
-                toX: targetX,
-                toY: targetY,
-                improvement: improvement,
-                strategy: 'stage1b-neighbor-enclosure',
-                search: {
-                  crossingCount: count,
-                  candidateVertices: candidates.map(function(item) { return item.index; }),
-                  testedEdges: testedEdges,
-                  testedPositions: testedPositions,
-                  neighborTriangle: [triangleA, triangleB, triangleC],
-                  degree: candidate.degree,
-                  incidentCrossingsBefore: incidentBefore,
-                  incidentCrossingsAfter: incidentAfter,
-                  bestImprovement: improvement
-                }
-              };
-            }
-          }
-        }
-      }
-    }
-
-    intersections(graph.links);
-    state.lastSideFlipAttempt = {
-      crossingCount: count,
-      candidateVertices: candidates.map(function(item) { return item.index; }),
-      testedEdges: testedEdges,
-      testedPositions: testedPositions,
-      bestImprovement: best ? best.improvement : 0,
-      exhausted: !best
-    };
-    if (best) best.search.finalAttempt = state.lastSideFlipAttempt;
-    return best;
-  }
-
   // Apply one strictly crossing-reducing geometric move.
   // This intentionally excludes structural, escape, clump, and zero-gain moves.
   function minimizeStep(graph, state) {
@@ -7246,24 +7511,55 @@
     // can be completed and locally repaired before Stage 1 reacts to temporary
     // motor-control crossings.
     if (state.activeStructuralPlan || graph.nodes.length > 100 ||
-        count > 120 || state.movesSinceCrossingProgress < 8 ||
         state.cleanAnchorBreakAttemptedAtBestCrossings ===
           state.bestCrossingCount) {
       return null;
     }
 
-    state.cleanAnchorBreakAttemptedAtBestCrossings = state.bestCrossingCount;
-    var cleanAnchorBreakReport = profileSection(
-      'clean-anchor-break-barrier-search',
-      function() {
-        return suggestAnchorBreakBarrierTransfer(graph, {
+    var profile = null;
+    if (count <= 120 && state.movesSinceCrossingProgress >= 8) {
+      profile = {
+        name: 'standard',
+        params: {
           timeBudgetMs: 250,
           componentLimit: 40,
           barrierLimit: 14,
           cleanupSteps: 24,
           keepCandidates: 6
-        });
+        }
+      };
+    } else if (graph.nodes.length <= 60 && count <= 220 &&
+        state.movesSinceCrossingProgress >= 22) {
+      var analysis = analyzeGraphState(graph, {});
+      var nucleusFraction = graph.nodes.length > 0
+        ? analysis.largestCleanRegion / graph.nodes.length : 1;
+      if (nucleusFraction < 0.25) {
+        profile = {
+          name: 'bad-nucleus',
+          nucleusFraction: nucleusFraction,
+          params: {
+            timeBudgetMs: 280,
+            componentLimit: 40,
+            barrierLimit: 18,
+            cleanupSteps: 24,
+            keepCandidates: 8
+          }
+        };
+      }
+    }
+
+    if (!profile) return null;
+
+    state.cleanAnchorBreakAttemptedAtBestCrossings = state.bestCrossingCount;
+    var cleanAnchorBreakReport = profileSection(
+      'clean-anchor-break-barrier-search',
+      function() {
+        return suggestAnchorBreakBarrierTransfer(graph, profile.params);
       });
+    cleanAnchorBreakReport.profile = profile.name;
+    if (profile.nucleusFraction !== undefined) {
+      cleanAnchorBreakReport.nucleusFraction = profile.nucleusFraction;
+    }
     state.lastAnchorBreakBarrierSearch = cleanAnchorBreakReport;
     var cleanAnchorBreak = cleanAnchorBreakReport.best;
     var hasCleanComponentBreak = cleanAnchorBreak &&
@@ -7274,15 +7570,138 @@
         cleanAnchorBreak.finalCrossings >= count) {
       return null;
     }
+    if (profile.name === 'bad-nucleus' &&
+        cleanAnchorBreak.downstreamImprovement <
+          Math.max(10, Math.ceil(count * 0.08))) {
+      return null;
+    }
 
     var cleanAnchorBreakResult = startAnchorBreakBarrierPlan(
       graph, state, count, cleanAnchorBreak, cleanAnchorBreakReport);
+    cleanAnchorBreakResult.move.search.anchorBreakProfile = {
+      name: profile.name,
+      nucleusFraction: profile.nucleusFraction,
+      params: profile.params
+    };
     return {
       done: false,
       improved: cleanAnchorBreakResult.improved,
       move: cleanAnchorBreakResult.move,
       count: cleanAnchorBreakResult.count
     };
+  };
+
+  // Anchored shakeup: a stall-triggered "explode and re-solve" tactic. Pin the 3
+  // widest convex-hull vertices as an outer frame, burst the central clump
+  // outward (each central vertex toward the corner its neighbors favor -
+  // "make-room"), then let ordinary Stage 1 re-solve the interior with those 3
+  // corners held fixed. This is NOT triangle triage and NOT a separating triangle
+  // - it's a whole-graph desperation restart. It emits exactly ONE move per step:
+  // make-room is paid out one vertex at a time, then the re-solve is ordinary
+  // Stage 1 with the anchors pinned. No unwind - if it fails to reach 0 within
+  // its budget it simply stops holding the anchors and Stage 1 carries on.
+  SolverController.prototype.tryAnchoredShakeup = function(graph, state, count) {
+    var opts = this.options || {};
+    var nodes = graph.nodes;
+    var N = nodes.length;
+    var sh = state.anchoredShakeup;
+
+    // ---- advance an ongoing shakeup ----
+    if (sh) {
+      // make-room phase: pay out the burst one vertex per step
+      if (sh.queue.length) {
+        var mv = sh.queue.shift();
+        var mnode = nodes[mv.index];
+        var move = {
+          node: mnode, nodeIndex: mv.index,
+          fromX: mnode[0], fromY: mnode[1], toX: mv.x, toY: mv.y,
+          improvement: 0, strategy: 'anchored-shakeup-makeroom',
+          search: { reason: 'anchored-shakeup make-room', anchors: sh.anchors.slice() }
+        };
+        return this.applyMove(graph, state, count, move, { attachPlan: false });
+      }
+      // make-room drained -> let ordinary Stage 1 re-solve the individuated interior
+      state.anchoredShakeup = null;
+      return null;
+    }
+
+    // ---- trigger a new shakeup on a stall ----
+    if (state.enableAnchoredShakeup === false) return null;
+    var minNodes = state.anchoredShakeupMinNodes || opts.anchoredShakeupMinNodes || 40;
+    if (N < minNodes) return null;
+    if ((state.movesSinceCrossingProgress || 0) < (opts.anchoredShakeupStall || 30)) return null;
+    if (state.anchoredShakeupAttemptedAtBestCrossings === state.bestCrossingCount) return null;
+    state.anchoredShakeupAttemptedAtBestCrossings = state.bestCrossingCount;
+
+    // convex hull (Andrew monotone chain) -> 3 widest points as the frame
+    var order = nodes.map(function(_, i) { return i; }).sort(function(a, b) {
+      return nodes[a][0] - nodes[b][0] || nodes[a][1] - nodes[b][1];
+    });
+    function crossP(o, a, b) {
+      return (nodes[a][0]-nodes[o][0])*(nodes[b][1]-nodes[o][1]) -
+             (nodes[a][1]-nodes[o][1])*(nodes[b][0]-nodes[o][0]);
+    }
+    var lo = [], hi = [];
+    for (var oi = 0; oi < order.length; oi++) { var p = order[oi];
+      while (lo.length >= 2 && crossP(lo[lo.length-2], lo[lo.length-1], p) <= 0) lo.pop(); lo.push(p); }
+    for (var ok = order.length - 1; ok >= 0; ok--) { var q = order[ok];
+      while (hi.length >= 2 && crossP(hi[hi.length-2], hi[hi.length-1], q) <= 0) hi.pop(); hi.push(q); }
+    lo.pop(); hi.pop();
+    var hull = lo.concat(hi);
+    if (hull.length < 3) return null;
+    var tri = hull.slice(0, 3);
+    if (hull.length > 3) {
+      var bestArea = 0;
+      for (var i = 0; i < hull.length; i++) for (var j = i+1; j < hull.length; j++) for (var k = j+1; k < hull.length; k++) {
+        var a = nodes[hull[i]], b = nodes[hull[j]], c = nodes[hull[k]];
+        var ar = Math.abs((b[0]-a[0])*(c[1]-a[1]) - (c[0]-a[0])*(b[1]-a[1]));
+        if (ar > bestArea) { bestArea = ar; tri = [hull[i], hull[j], hull[k]]; }
+      }
+    }
+    var triSet = {}; tri.forEach(function(v) { triSet[v] = true; });
+    var A = nodes[tri[0]].slice(), B = nodes[tri[1]].slice(), C = nodes[tri[2]].slice();
+    var corners = [A, B, C];
+    var idx = new Map(); nodes.forEach(function(n, ii) { idx.set(n, ii); });
+    var adj = []; for (var ai = 0; ai < N; ai++) adj.push([]);
+    graph.links.forEach(function(l) { var a = idx.get(l[0]), b = idx.get(l[1]); adj[a].push(b); adj[b].push(a); });
+    function bary(pt) {
+      var v0 = [B[0]-A[0], B[1]-A[1]], v1 = [C[0]-A[0], C[1]-A[1]], v2 = [pt[0]-A[0], pt[1]-A[1]];
+      var d00 = v0[0]*v0[0]+v0[1]*v0[1], d01 = v0[0]*v1[0]+v0[1]*v1[1], d11 = v1[0]*v1[0]+v1[1]*v1[1];
+      var d20 = v2[0]*v0[0]+v2[1]*v0[1], d21 = v2[0]*v1[0]+v2[1]*v1[1];
+      var den = d00*d11 - d01*d01; var vv = (d11*d20-d01*d21)/den, ww = (d00*d21-d01*d20)/den;
+      return [1-vv-ww, vv, ww];
+    }
+    // build the make-room queue: central vertices (no corner dominates them)
+    var queue = [];
+    for (var v = 0; v < N; v++) {
+      if (triSet[v]) continue;
+      var b0 = bary(nodes[v]);
+      if (Math.max(b0[0], b0[1], b0[2]) < 0.5) {
+        var nb = adj[v]; if (!nb.length) continue;
+        var ncx = 0, ncy = 0; nb.forEach(function(w) { ncx += nodes[w][0]; ncy += nodes[w][1]; });
+        ncx /= nb.length; ncy /= nb.length;
+        var nbB = bary([ncx, ncy]);
+        var dom = nbB[0] >= nbB[1] && nbB[0] >= nbB[2] ? 0 : (nbB[1] >= nbB[2] ? 1 : 2);
+        queue.push({
+          index: v,
+          x: ncx*0.5 + corners[dom][0]*0.5 + (v % 5 - 2) * 0.006,
+          y: ncy*0.5 + corners[dom][1]*0.5 + ((v*3) % 5 - 2) * 0.006
+        });
+      }
+    }
+    if (queue.length === 0) return null; // nothing bunched to shake out
+
+    state.anchoredShakeup = { anchors: tri.slice(), queue: queue };
+    // pay out the first make-room move now
+    var first = state.anchoredShakeup.queue.shift();
+    var fnode = nodes[first.index];
+    var firstMove = {
+      node: fnode, nodeIndex: first.index,
+      fromX: fnode[0], fromY: fnode[1], toX: first.x, toY: first.y,
+      improvement: 0, strategy: 'anchored-shakeup-makeroom',
+      search: { reason: 'anchored-shakeup make-room (start)', anchors: tri.slice() }
+    };
+    return this.applyMove(graph, state, count, firstMove, { attachPlan: false });
   };
 
   SolverController.prototype.step = function(graph, state) {
@@ -7304,6 +7723,12 @@
     // strategies to react to its intermediate geometry.
     pendingResult = this.tryPendingFinisher(graph, state, count);
     if (pendingResult) return pendingResult;
+
+    // Anchored shakeup: stall-triggered "explode and re-solve". Advances an
+    // ongoing shakeup (paying out make-room one vertex at a time, or holding the
+    // three anchors while Stage 1 re-solves) or triggers a new one on a stall.
+    var shakeup = this.tryAnchoredShakeup(graph, state, count);
+    if (shakeup) return shakeup;
 
     var phaseResult = this.tryCleanAnchorBreak(graph, state, count);
     if (phaseResult) return phaseResult;
@@ -7532,29 +7957,6 @@
           count: newCount
         };
       }
-    }
-
-    // Stage 1b: after ordinary geometric descent is genuinely exhausted, try
-    // a few strictly reducing topological side flips, then return to Stage 1.
-    best = profileSection('reducing-side-flip', function() {
-      return findReducingSideFlipMove(graph, state);
-    });
-    if (best) {
-      best.node[0] = best.toX;
-      best.node[1] = best.toY;
-      recordMove(state, best.nodeIndex, best.toX, best.toY);
-      state.sideFlipVertices[best.nodeIndex] = true;
-      state.sideFlipMoves = (state.sideFlipMoves || 0) + 1;
-      var newCount = intersections(graph.links);
-      state.stuckCount = 0;
-      state.recentAttempts = {};
-      state.finisherAttemptedAtCount = null;
-      return {
-        done: false,
-        improved: true,
-        move: attachStructuralPlan(state, best),
-        count: newCount
-      };
     }
 
     // Stage 3: in a nearly solved graph, relocate a small component through a
@@ -8332,10 +8734,10 @@
     for (var i = 0; i < graph.nodes.length; i++) {
       var node = graph.nodes[i];
       if (!node.intersection) continue;
-      
+
       var neighbors = getNeighbors(graph, node);
       if (neighbors.length === 0) continue;
-      
+
       // Use weighted centroid instead of simple centroid
       var target = weightedCentroid(graph, node);
       if (!target) continue;
@@ -8586,6 +8988,7 @@
   exports.suggestAnchorBreakBarrierTransfer = suggestAnchorBreakBarrierTransfer;
   exports.suggestProblemChildInversions = suggestProblemChildInversions;
   exports.findSeparatingTriangles = findSeparatingTriangles;
+  exports.suggestTriangleTriage = suggestTriangleTriage;
   exports.suggestContainedTriangleSolve = suggestContainedTriangleSolve;
   exports.suggestStage2Move = suggestStage2Move;
   exports.suggestSeparatorReshape = suggestSeparatorReshape;
@@ -8597,7 +9000,6 @@
   exports.suggestStage1cResetPlan = suggestStage1cResetPlan;
   exports.suggestCascadeTriggerMove = suggestCascadeTriggerMove;
   exports.findAdaptiveMinimizeMove = findAdaptiveMinimizeMove;
-  exports.findReducingSideFlipMove = findReducingSideFlipMove;
   exports.createSolverController = createSolverController;
   exports.minimizeStep = minimizeStep;
   exports.solverStep = solverStep;

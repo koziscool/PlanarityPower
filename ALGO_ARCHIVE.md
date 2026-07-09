@@ -76,6 +76,42 @@ region extension, wasted-tail interventions, high-crossing Stage 1c, and escape.
 The goal is to make parameter/gate experiments local to controller phases while
 preserving browser and benchmark compatibility.
 
+### Bad-Nucleus Anchor-Break Barrier Profile
+
+The controller now owns a second `tryCleanAnchorBreak()` profile for weak-nucleus
+50v-style stalls. The low-level `suggestAnchorBreakBarrierTransfer()` function
+already supports broad search parameters; the important change is that the
+controller decides when the extra budget is worth spending.
+
+Current default profiles:
+
+- **standard**: `count <= 120`, `movesSinceCrossingProgress >= 8`,
+  `componentLimit: 40`, `barrierLimit: 14`, `cleanupSteps: 24`,
+  `timeBudgetMs: 250`.
+- **bad-nucleus**: `N <= 60`, `count <= 220`,
+  `movesSinceCrossingProgress >= 22`, `largestCleanRegion / N < 0.25`,
+  `componentLimit: 40`, `barrierLimit: 18`, `cleanupSteps: 24`,
+  `timeBudgetMs: 280`, plus an extra acceptance floor:
+  `downstreamImprovement >= max(10, ceil(0.08 * count))`.
+
+Both profiles still require a clean anchor break, zero final damage, and
+projected final crossings below the current count. This keeps the new profile
+as a conservative lifecycle expansion, not a new permissive move type.
+
+50v seed `12345`, 20 graphs, 700 move cap, deterministic clock:
+
+| profile | solved | avg moves | median | longest | note |
+|---------|--------|-----------|--------|---------|------|
+| baseline before bad-nucleus profile | 20/20 | 205.8 | 192 | 408 | after retiring 1b |
+| loose bad-nucleus (`count<=260`, `msp>=14`, larger budget) | 19/20 | 203.8 | 198 | 292 | found big wins but caused one miss |
+| middle bad-nucleus (`count<=240`, `msp>=18`) | 20/20 | 208.5 | 205 | 276 | preserved solves but hurt average |
+| current strict bad-nucleus | 20/20 | 203.95 | 192 | 408 | safe, small average win |
+
+Interpretation: there is real juice in earlier barrier deployment, but weak
+nucleus alone is not a sufficient gate for aggressive parameters. Keep the
+strict version as the default while looking for a better signal to distinguish
+the graph-12-style wins from the graph-7-style trajectory damage.
+
 Follow-up cascade-trigger mining found that usable solved wasted-tail histories
 usually start their final cascade from an ordinary single-vertex adaptive move,
 not from an already-labeled structural tool. The common event is a large
@@ -118,15 +154,21 @@ These are available as interactive buttons but removed from the auto solver loop
 | `findRelocateMove` | Move yellow vertices toward their weighted centroid | Allows +3 crossing increase for "reorganization"; too risky in auto mode |
 | `findConsolidateMove` | Grow largest geometric cluster by pulling in nearby vertices | Intentionally ignores crossing count; purely structural |
 
-### Stage 1b: Reducing Topological Side Flips
-- **What**: After adaptive and anchored-centroid descent are exhausted, test a
-  bounded set of degree-2-to-5 conflicting vertices on the opposite side of
-  edges between their neighbors, or inside triangles formed by their neighbors.
-- **Acceptance**: Strict immediate crossing reduction only.
+### Retired Stage 1b: Reducing Topological Side Flips
+- **What it did**: After adaptive and anchored-centroid descent were exhausted,
+  tested a bounded set of degree-2-to-5 conflicting vertices on the opposite
+  side of edges between their neighbors, or inside triangles formed by their
+  neighbors.
+- **Acceptance**: Strict immediate incident-crossing reduction only.
 - **Budget**: At most six ranked candidates and four unique accepted moves per
-  Stage 1 run. A successful flip returns control to ordinary Stage 1 descent.
-- **Why**: Captures visually obvious "sore thumb belongs across this edge/in
-  this enclosure" moves without opening the much larger component-move search.
+  graph. A successful flip returned control to ordinary Stage 1 descent.
+- **Why removed**: It produced small local cleanup, not the cascade/nucleus
+  behavior we are now trying to exploit. Measured 40/50v histories showed about
+  0.9 to 2.0 accepted moves per graph, almost all `neighbor-enclosure`; sampled
+  replay moves had immediate drops of 1-4 crossings and no clear 10-move
+  cascade signature. The stronger direction is to adapt barrier/anchor-break
+  tools and Stage 1c group/nucleus creation under controller-owned gates.
+- **Recovery**: Removed from `solver.js`; recover from git history if needed.
 
 ### High-Crossing Stage 1c: Nucleus Creation
 - **What**: In larger graphs (`<=60` vertices) that stall with crossings still
@@ -386,13 +428,13 @@ incidence, but do not execute.
 The solver now has reusable structural-plan state. A plan records its objective,
 movable/protected vertices, optional direction or separator, completion
 condition, and executed step count. The first active use is deliberately
-conservative: after Stage 1, Stage 1b, and the existing finisher fail at 15 or
+conservative: after Stage 1 and the existing finisher fail at 15 or
 fewer crossings, the solver may automatically commit a bounded Stage 2 restart
 only when its deterministic rollout projects zero crossings. Partial-progress
 restarts remain suggestion-only.
 
 The second active structural-plan use is a bounded region-extension planner.
-After Stage 1, Stage 1b, the finisher, and the proven-solve restart fail, graphs
+After Stage 1, the finisher, and the proven-solve restart fail, graphs
 of at most 60 vertices and 80 crossings may test up to five compatible-anchor
 directional groups at three translation distances. Each candidate receives at
 most eight simulated Stage 1 cleanup moves under an approximately 110 ms
@@ -523,39 +565,53 @@ descent to fail the strong-improvement target more often, falling through to
 fallbacks earlier. That's a feature, not a bug — pairs with planned
 opportunistic-compaction fallback work.
 
-### June 2026 Stage 1 two-list split: cheap main list, periodic big list
+### July 2026 Stage 1 long-edge fallback: experimental, off by default
 
-`findAdaptiveMinimizeMove` was refactored to test two disjoint candidate lists
-per call. Motivation: at 80v, runs across seeds 25–30 showed `strongImprovement`
-early-exit firing only ~27% of the time, so candidate-list size directly drove
-runtime. Eyeballing also suggested longer candidate lists produced better moves
-— but high-crossings high-degree vertices kept hogging the top of the ranking
-even when their crossings are a consequence of neighbor positions, not their
-own position.
+`findAdaptiveMinimizeMove` supports a wider fallback pass. Motivation: at 80v,
+the solver can keep making weak crossing reductions while failing to build a
+clean nucleus. Retrying the same top crossing vertices with a more expensive
+probe regressed seed `12345`, so the fallback now looks for a different kind of
+candidate: crossing vertices whose incident edges are unusually long relative
+to the graph median.
 
 Shape:
 
 - **Main list** — top 18 by score (`crossings*2 + crossings/degree -
-  repeatPenalty`), excluding the big-list slice. Cheap probe per candidate:
+  repeatPenalty`). Cheap probe per candidate:
   centroid + half-centroid + 3 local directions + 1 random sample. Strategy
   tags `adaptive-centroid`, `adaptive-centroid-half`, `adaptive-local`,
   `adaptive-random`.
-- **Big list** — top 12 by the same score. Expensive probe: centroid +
-  half-centroid + 8 local directions + 5 random samples. Fires every 8th call
-  (the other 7 use the main list). Strategy tags `big-centroid`,
-  `big-centroid-half`, `big-local`, `big-random`.
-- **Lists are disjoint per call** — the same ranked list is sliced into the
-  two; vertices float between them as their crossings change across moves.
+- **Long-edge fallback** — disabled by default. If explicitly enabled, on
+  graphs with at least 70 vertices, if the cheap pass misses the
+  strong-improvement target, the solver tests the top 12 crossing vertices by
+  `crossings * lengthPressure / sqrt(degree)`, where `lengthPressure` comes
+  from average/max incident edge length normalized by median graph edge length.
+  Probe: centroid + half-centroid + 4 local directions + 1 random sample.
+  Strategy tags are
+  `adaptive-long-centroid`, `adaptive-long-centroid-half`,
+  `adaptive-long-local`, `adaptive-long-random`.
+- **Lists are deliberately different** — the fallback is meant to find
+  stretched, possibly low-degree vertices that the crossing-count ranking
+  underweights, not to spend more time hammering the same high-degree hubs.
 - **Random angle θ** — one uniform-random angle drawn per call, used by both
   lists for the local-direction probes (`θ + k * 2π/N`). Counters de-aliasing
   across consecutive calls on candidates that didn't move.
-- **Counter** — `state.bigListCounter` increments each main-list call, resets
-  to 0 after a big-list call OR after any short-circuit (strongImprovement
-  cleared).
+- **Counter** — `state.adaptiveWideListCounter` increments each main-list call,
+  resets to 0 after a wide-list call OR after any short-circuit
+  (`strongImprovement` cleared).
 
-Per-call worst-case cost: main list 18 × 6 = 108 tests; big list 12 × 18 =
-216 tests. Averaged over a 9-call cycle: ~120/call, comparable to the prior
-12 × 10 = 120/call.
+Per-call worst-case cost when the fallback runs: main list 18 × 6 = 108 tests
+plus long-edge list 12 × 7 = 84 tests. Because it is gated to larger graphs and
+weak Stage 1 calls, the expected browser cost should remain bounded while
+testing a candidate class tied to the manual Stage 1c observations.
+
+Status: not accepted as a default policy. On deterministic seed `12345`, 5
+graphs of 80 vertices, baseline was 2/5 solved with failed residuals
+`173, 73, 84`. A same-top expensive fallback regressed to 1/5. The long-edge
+fallback also regressed to 1/5 and knocked a previously solved graph out of the
+solved set. Keep this as an explicit experiment only; long edges may still be a
+good diagnostic or group-selection feature, but not as a direct "take the best
+single crossing reduction" Stage 1 override.
 
 Refactor split out a shared `runDescentPass(ctx, candidates, spec)` helper so
 both lists use the same testPosition/oscillation/bounds logic with different

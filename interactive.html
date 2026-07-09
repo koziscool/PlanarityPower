@@ -1412,11 +1412,6 @@
           ' vertices; best -' + attempt.bestImprovement +
           (attempt.exhausted ? ' (exhausted)' : '')
         : 'none yet';
-      var sideFlip = analysis.lastSideFlipAttempt;
-      var sideFlipText = sideFlip
-        ? sideFlip.testedPositions + ' positions / ' + sideFlip.testedEdges +
-          ' neighbor edges; best -' + sideFlip.bestImprovement
-        : 'none yet';
       var established = analysis.bestEstablishedRegion;
       var establishedText = established
         ? established.vertexCount + ' verts; score ' + established.score.toFixed(2) +
@@ -1520,9 +1515,7 @@
         '<div>Recent: [' + analysis.recentCrossings.join(', ') + ']</div>' +
         '<div>Repeated vertices: ' +
           (analysis.oscillatingVertices.join(', ') || 'none') + '</div>' +
-        '<div>Last minimize: ' + attemptText + '</div>' +
-        '<div>Stage 1b flips used: ' + analysis.sideFlipMoves + '/4</div>' +
-        '<div>Last Stage 1b: ' + sideFlipText + '</div>';
+        '<div>Last minimize: ' + attemptText + '</div>';
 
       return analysis;
     }

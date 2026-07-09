@@ -183,6 +183,14 @@ function runPuzzle(index, sourceGraph, maxMoves) {
   if (process.env.ENABLE_ANCHOR_BREAK_AUTO === '1') {
     state.enableAnchorBreakAuto = true;
   }
+  // Anchored shakeup is on by default (fires only on stalls, graphs >= floor).
+  // Disable it for baseline A/B comparisons; override the size floor if needed.
+  if (process.env.DISABLE_ANCHORED_SHAKEUP === '1') {
+    state.enableAnchoredShakeup = false;
+  }
+  if (process.env.ANCHORED_SHAKEUP_MIN) {
+    state.anchoredShakeupMinNodes = Number(process.env.ANCHORED_SHAKEUP_MIN);
+  }
   const strategies = {};
   const crossingHistory = [initialCrossings];
   const extensionPlans = [];

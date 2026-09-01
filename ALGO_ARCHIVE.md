@@ -129,6 +129,66 @@ hook fired only 11 times but changed enough trajectories to reduce solve rate.
 It remains exported/available for explicit experiments via
 `ENABLE_CASCADE_TRIGGER=1`, but normal solver policy does not call it.
 
+## Dirty-edge-length steering (tried, does not work — kept off by default)
+
+**Idea.** Crossings say how bad a drawing is but not how *localized* the trouble
+is. A long dirty edge (one that crosses something) spans the drawing; a short one
+keeps the conflict local. Motivated by watching a Tutte relaxation, where the long
+edges go clean early and stay clean while conflict collapses into short edges.
+
+**Intervention.** `ctx.dirtySteering` in `runDescentPass`: among candidate
+positions **tied on crossings**, prefer the one that most reduces dirty-edge length
+(`countEdgeCrossingsWithDirtyLength`, folded into the existing sweep so it costs no
+extra intersect tests). Crossings still win outright, so descent stays monotone and
+the tie-break costs no crossing progress. Gated on crossing count, opt-in via
+`state.enableDirtySteering` / `ENABLE_DIRTY_STEERING=1`.
+
+The intent was not to escape stalls but to **control where the stall lands** —
+hand `dominant-barrier` / `contained-triangle` / the finishers a localized state
+they can recognise instead of a scattered one.
+
+**Result: it does not work.** 60v, six seeds × 20 puzzles, `--deterministic-clock`:
+
+| arm | solved | rate | worst seed |
+|---|---|---|---|
+| baseline | 85/120 | 70.8% | 60% |
+| steering, gate ≤ 40 crossings | 88/120 | 73.3% | 60% |
+| steering, gate ≤ 12 crossings | 77/120 | **64.2%** | 55% |
+
+`+3/120` at gate 40 is inside noise. The decisive result is gate 12: it targets the
+band with by far the *strongest* diagnostic separation (failed/solved median dirty
+ratio 4.23× at 3–5 crossings, see METRICS.md §6) and it is **8 puzzles worse than
+doing nothing**. If gate 40's `+3` were real signal concentrated in the low band,
+gate 12 should have captured most of it; instead it reverses.
+
+**Why it probably fails, and the transferable lesson.** A metric that *diagnoses*
+is not a metric that *steers* — a good thermometer is not a good compass. The
+separation is real (METRICS.md §6) but knowing a state is bad does not identify
+which move improves it. Additionally, below ~12 crossings the endgame structural
+strategies are the ones doing the work, so a Stage 1 tie-break there perturbs
+exactly the states those strategies were about to recognise — the opposite of the
+intended effect.
+
+**Left in-tree, off by default.** The metric (`dirtyEdgeStats`) is worth keeping as
+a diagnostic regardless; the steering is one env var away for anyone who wants to
+re-test it against a different lever.
+
+**Not tried, and the more promising direction the failures pointed at.** On the
+puzzles where steering drove the state deeper than baseline reached (0–10
+crossings) and then lost it, the moves were consumed by `escape-random` /
+`escape-boundary` churn. That escape path already tolerates a +5 crossing
+degradation but selects by *least crossing damage*, so it takes the move that
+changes least and oscillates. It has a budget and no criterion for spending it —
+a directed escape is a separate and better-motivated lever than the Stage 1
+tie-break.
+
+**Caveat on all of the above:** measured in the headless
+`--deterministic-clock` regime, which solves ~71% at 60v. `solver.html` runs
+tighter budgets and solves ~56–58%. `setDeterministicClock(enabled, {stepMs})`
+would give a reproducible proxy for that regime (`benchmark-stage2.js` passes no
+options, so `stepMs = 1`); it was never exercised. A verdict here does not
+automatically transfer there.
+
 ## Removed Strategies
 
 These implementations were removed from `solver.js` during consolidation because

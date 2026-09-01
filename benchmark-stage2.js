@@ -203,6 +203,15 @@ function runPuzzle(index, sourceGraph, maxMoves) {
   if (process.env.DIRTY_STEERING_MAX) {
     state.dirtySteeringMaxCrossings = Number(process.env.DIRTY_STEERING_MAX);
   }
+  // Structural-strategy size gates. Defaults (60/60/25) are unchanged; these exist
+  // so the limits can be measured. At 61+ vertices compaction and region extension
+  // are both off by default, which is why runs above 60v show extensions=0.
+  if (process.env.STRUCTURAL_MAX_NODES) {
+    const n = Number(process.env.STRUCTURAL_MAX_NODES);
+    state.compactionMaxNodes = n;
+    state.regionExtensionMaxNodes = n;
+    state.stage1cMaxNodes = n;
+  }
   const strategies = {};
   const crossingHistory = [initialCrossings];
   const extensionPlans = [];

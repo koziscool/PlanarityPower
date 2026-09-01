@@ -7970,8 +7970,12 @@
     // 40-stuck threshold — fire earlier when count <= 20.
     var compactionStalled = state.movesSinceCrossingProgress >= 40 ||
         (count <= 20 && state.movesSinceCrossingProgress >= 15);
+    // Size gate. Default 60 preserves historical behaviour, but note that it puts
+    // the 60v benchmark exactly ON the boundary: at 61+ vertices this strategy is
+    // silently off, which is why runs at 70v+ show extensions=0. Configurable so
+    // the limit can be measured rather than assumed.
     if (!state.disableCompaction && !state.activeStructuralPlan &&
-        graph.nodes.length <= 60 &&
+        graph.nodes.length <= (state.compactionMaxNodes || 60) &&
         compactionStalled &&
         state.compactionAttemptedAtBestCrossings !== state.bestCrossingCount) {
       state.compactionAttemptedAtBestCrossings = state.bestCrossingCount;
@@ -8263,7 +8267,10 @@
     // structural hypothesis per stalled crossing count, and commit only when
     // simulation shows both meaningful region/localization progress and a
     // productive return to Stage 1.
-    if (!state.activeStructuralPlan && graph.nodes.length <= 60 && count <= 80 &&
+    // Same size gate as compaction, same caveat -- off at 61+ vertices by default.
+    if (!state.activeStructuralPlan &&
+        graph.nodes.length <= (state.regionExtensionMaxNodes || 60) &&
+        count <= (state.regionExtensionMaxCrossings || 80) &&
         state.regionExtensionAttemptedAtCount !== count) {
       state.regionExtensionAttemptedAtCount = count;
       var extensionReport = profileSection('region-extension-search', function() {
@@ -8523,8 +8530,8 @@
     // fires at the same boundary where Interactive users were manually making
     // reset moves: ordinary descent is exhausted, but before escape churn.
     if (!state.activeStructuralPlan &&
-        graph.nodes.length <= 25 &&
-        count <= 60 &&
+        graph.nodes.length <= (state.stage1cMaxNodes || 25) &&
+        count <= (state.stage1cMaxCrossings || 60) &&
         state.stage1cAttemptedAtCount !== count) {
       state.stage1cAttemptedAtCount = count;
       var stage1cReport = profileSection('stage1c-reset-search', function() {

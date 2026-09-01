@@ -2294,6 +2294,35 @@
     };
   }
 
+  // Board scale for physical "make room" distances. Mirrors solver.html's
+  // per-graph viewport, whose drawable area is (size - 20)px (see scaleX/scaleY).
+  var ENDPOINT_ROOM = {
+    pxPerInch: 96,
+    viewWidthPx: 800,
+    viewHeightPx: 550,
+    minInches: 0.25,
+    maxInches: 0.75,
+    // 'outside' discounts the transferring component; 'strict' does not; 'off'
+    // disables endpoint room moves. OFF for now: the current fn only nudges the
+    // endpoints for room while STILL transferring the whole component, so it just
+    // adds moves. The valuable version (deferred) is endpoint relocation as a
+    // SUBSTITUTE for the transfer - open the barrier by moving its 2 endpoints to
+    // their external-constraint limits and skip most of the component move. Env
+    // override for A/B. See project memory: barrier-endpoint-substitution.
+    defaultMode: (typeof process !== 'undefined' && process.env &&
+      process.env.ENDPOINT_ROOM_MODE) || 'off'
+  };
+  // Normalized [0,1] step whose on-screen length is ~inches along unit direction
+  // (nx,ny). The board is non-square, so a physical quarter-inch is a different
+  // coordinate delta horizontally vs vertically; convert per-direction.
+  function inchesToNormalStep(inches, nx, ny) {
+    var wPx = ENDPOINT_ROOM.viewWidthPx - 20;
+    var hPx = ENDPOINT_ROOM.viewHeightPx - 20;
+    var perUnitPx = Math.sqrt((nx * wPx) * (nx * wPx) + (ny * hPx) * (ny * hPx));
+    if (perUnitPx < 1e-9) return inches;
+    return (inches * ENDPOINT_ROOM.pxPerInch) / perUnitPx;
+  }
+
   function tryAnchorBreakEndpointRoomMoves(graph, barrier, component, targetSign,
       margin, ignoreComponentCrossings) {
     var barrierA = graph.nodes.indexOf(barrier[0]);
@@ -2319,15 +2348,21 @@
     var baseTotal = intersections(simulation.links);
     var outsideBase = countEndpointOutsideCrossings(
       simulation, [barrierA, barrierB], componentSet);
-    var steps = ignoreComponentCrossings
-      ? [margin * 1.5, margin * 3.0, 0.025, 0.04, 0.06]
-      : [margin * 1.2, margin * 2.0, margin * 3.0, 0.025, 0.04];
+    // Push each endpoint opposite the transfer, as far as we can: from ~0.75in
+    // down to ~0.25in of physical board distance, taking the LARGEST step that
+    // adds no extraneous crossings. "Extraneous" excludes the component (it is
+    // transferring to the far side anyway) - without that discount, the endpoint
+    // move looks like it collides with the component's pre-transfer position and
+    // is almost always rejected.
+    var roomInches = [ENDPOINT_ROOM.maxInches, 0.6, 0.45, 0.35,
+      ENDPOINT_ROOM.minInches];
 
     [barrierA, barrierB].forEach(function(index) {
       var original = graph.nodes[index];
       var best = null;
 
-      steps.forEach(function(step) {
+      for (var si = 0; si < roomInches.length && !best; si++) {
+        var step = inchesToNormalStep(roomInches[si], normal[0], normal[1]);
         var lateral = [
           (componentCenter[0] - original[0]) * 0.08,
           (componentCenter[1] - original[1]) * 0.08
@@ -2348,33 +2383,26 @@
         simulation.nodes[index][0] = beforeX;
         simulation.nodes[index][1] = beforeY;
 
-        if (ignoreComponentCrossings) {
-          if (outsideAfter > outsideBase) return;
-        } else if (
-            (counts[barrierA] || 0) > (endpointBaseCounts[barrierA] || 0) ||
-            (counts[barrierB] || 0) > (endpointBaseCounts[barrierB] || 0)) {
-          return;
-        }
-        var score = ignoreComponentCrossings
-          ? outsideAfter - outsideBase - step * 0.08
-          : total - baseTotal - step * 0.01;
-        if (!best || score < best.score) {
-          best = {
-            index: index,
-            x: x,
-            y: y,
-            mode: 'anchor-break-endpoint-room',
-            strategy: 'anchor-break-endpoint-room',
-            endpointCrossingsBefore: endpointBaseCounts[index] || 0,
-            endpointCrossingsAfter: counts[index] || 0,
-            outsideEndpointCrossingsBefore: outsideBase,
-            outsideEndpointCrossingsAfter: outsideAfter,
-            totalCrossingsAfter: total,
-            roomStep: step,
-            score: score
-          };
-        }
-      });
+        var clean = ignoreComponentCrossings
+          ? outsideAfter <= outsideBase
+          : ((counts[barrierA] || 0) <= (endpointBaseCounts[barrierA] || 0) &&
+             (counts[barrierB] || 0) <= (endpointBaseCounts[barrierB] || 0));
+        if (!clean) continue;
+        best = {
+          index: index,
+          x: x,
+          y: y,
+          mode: 'anchor-break-endpoint-room',
+          strategy: 'anchor-break-endpoint-room',
+          endpointCrossingsBefore: endpointBaseCounts[index] || 0,
+          endpointCrossingsAfter: counts[index] || 0,
+          outsideEndpointCrossingsBefore: outsideBase,
+          outsideEndpointCrossingsAfter: outsideAfter,
+          totalCrossingsAfter: total,
+          roomStepInches: roomInches[si],
+          roomStep: step
+        };
+      }
 
       if (best) {
         simulation.nodes[index][0] = best.x;
@@ -2430,7 +2458,7 @@
         Math.abs(sideOfEdge(barrier, graph.nodes[b]));
     });
     var positions = [];
-    if (endpointRoomMode !== false) {
+    if (endpointRoomMode !== false && endpointRoomMode !== 'off') {
       positions = tryAnchorBreakEndpointRoomMoves(
         graph, barrier, component, targetSign, margin,
         endpointRoomMode === 'outside');
@@ -2585,7 +2613,7 @@
             graph, barrier, component, -sourceSign,
             options.margin === undefined ? 0.005 : options.margin,
             options.endpointRoomMode === undefined
-              ? 'strict' : options.endpointRoomMode);
+              ? ENDPOINT_ROOM.defaultMode : options.endpointRoomMode);
           if (!transfer) {
             rejected.push({
               barrier: [barrierA, barrierB],
@@ -6583,12 +6611,14 @@
       }
 
       var step = (Math.PI * 2) / spec.localDirs;
+      var radii = spec.localRadii || [0.04];
       for (var d = 0; d < spec.localDirs; d++) {
         var angle = theta + d * step;
+        var radius = radii[d % radii.length];
         deterministicTested++;
         if (testPosition(item, edges, crossingsBefore,
-            node[0] + Math.cos(angle) * 0.04,
-            node[1] + Math.sin(angle) * 0.04,
+            node[0] + Math.cos(angle) * radius,
+            node[1] + Math.sin(angle) * radius,
             prefix + 'local')) break;
       }
       if (bestImprovement >= strongImprovement) break;
@@ -6677,8 +6707,9 @@
     var result = runDescentPass(ctx, mainList, {
       centroid: true,
       half: true,
-      localDirs: 3,
-      randomSamples: 1,
+      localDirs: options.localDirs || 3,
+      localRadii: options.localRadii || null,
+      randomSamples: options.randomSamples === undefined ? 1 : options.randomSamples,
       strategyPrefix: 'adaptive-'
     });
     var wideResult = null;
@@ -7510,14 +7541,14 @@
     // crossed side has a clean stopping point, so a bounded component transfer
     // can be completed and locally repaired before Stage 1 reacts to temporary
     // motor-control crossings.
-    if (state.activeStructuralPlan || graph.nodes.length > 100 ||
+    if (state.activeStructuralPlan || graph.nodes.length > 200 ||
         state.cleanAnchorBreakAttemptedAtBestCrossings ===
           state.bestCrossingCount) {
       return null;
     }
 
     var profile = null;
-    if (count <= 120 && state.movesSinceCrossingProgress >= 8) {
+    if (count <= 250 && state.movesSinceCrossingProgress >= 8) {
       profile = {
         name: 'standard',
         params: {
@@ -7528,7 +7559,7 @@
           keepCandidates: 6
         }
       };
-    } else if (graph.nodes.length <= 60 && count <= 220 &&
+    } else if (graph.nodes.length <= 200 && count <= 250 &&
         state.movesSinceCrossingProgress >= 22) {
       var analysis = analyzeGraphState(graph, {});
       var nucleusFraction = graph.nodes.length > 0
@@ -7626,7 +7657,11 @@
     }
 
     // ---- trigger a new shakeup on a stall ----
-    if (state.enableAnchoredShakeup === false) return null;
+    // Opt-in: disabled by default. It reliably finds moves but isn't effective
+    // enough to earn its runtime/move-length cost, and eyeballing it in solver
+    // it doesn't do what we want yet. Kept in-tree pending a refactor toward the
+    // 1c-style move; set state.enableAnchoredShakeup = true to exercise it.
+    if (state.enableAnchoredShakeup !== true) return null;
     var minNodes = state.anchoredShakeupMinNodes || opts.anchoredShakeupMinNodes || 40;
     if (N < minNodes) return null;
     if ((state.movesSinceCrossingProgress || 0) < (opts.anchoredShakeupStall || 30)) return null;
@@ -7704,6 +7739,41 @@
     return this.applyMove(graph, state, count, firstMove, { attachPlan: false });
   };
 
+  // Wide Stage 1: a stall-rescue retry of ordinary greedy descent with a much
+  // wider search - 25 candidate vertices, 10 random samples, and a 6-direction
+  // local sweep spaced 60deg apart alternating 0.04/0.08 radius. Too expensive
+  // for the per-frame main loop, but fired once per plateau it can surface a
+  // productive single-vertex move the narrow pass simply could not reach (the
+  // "a1" stall: a move exists, greedy just couldn't see it). Returns one move,
+  // or null -> fall through to the structural strategies.
+  SolverController.prototype.tryWideStage1 = function(graph, state, count) {
+    if (state.enableWideStage1 !== true) return null;
+    var opts = this.options || {};
+    var stall = state.wideStage1Stall || opts.wideStage1Stall || 8;
+    if ((state.movesSinceCrossingProgress || 0) < stall) return null;
+    if (state.wideStage1AttemptedAtBestCrossings === state.bestCrossingCount) {
+      return null;
+    }
+    state.wideStage1AttemptedAtBestCrossings = state.bestCrossingCount;
+    var best = profileSection('stall-wide-stage1', function() {
+      return findAdaptiveMinimizeMove(graph, state, {
+        mainListLimit: 25,
+        randomSamples: 10,
+        localDirs: 6,
+        localRadii: [0.04, 0.08]
+      });
+    });
+    if (!best) return null;
+    best.strategy = 'stall-wide-stage1';
+    var result = this.applyMove(graph, state, count, best, { attachPlan: false });
+    if (result.improved) {
+      state.stuckCount = 0;
+      state.recentAttempts = {};
+      state.finisherAttemptedAtCount = null;
+    }
+    return result;
+  };
+
   SolverController.prototype.step = function(graph, state) {
     state = state || {};
     var count = this.initializeStep(graph, state);
@@ -7732,6 +7802,13 @@
 
     var phaseResult = this.tryCleanAnchorBreak(graph, state, count);
     if (phaseResult) return phaseResult;
+
+    // Wide Stage 1 retry (once per plateau) before the heavier structural resets:
+    // if a productive single-vertex move exists that the narrow pass couldn't
+    // reach, take it rather than restructuring. Non-disruptive (one greedy move
+    // or null), so it can't dismantle a clean-anchor-break opportunity.
+    var wideStage1 = this.tryWideStage1(graph, state, count);
+    if (wideStage1) return wideStage1;
 
     // One conservative compaction attempt per stalled crossing minimum. The
     // complete advance/repair schedule runs as a structural plan so Stage 1
@@ -8185,8 +8262,8 @@
     // reset to shorten/collect a local structure and hand Stage 1 a better
     // target-rich state. This is current-position reasoning, not rollback.
     if (!state.activeStructuralPlan &&
-        graph.nodes.length <= 60 &&
-        count > 50 && count <= 160 &&
+        graph.nodes.length <= 200 &&
+        count > 50 && count <= 250 &&
         state.movesSinceCrossingProgress >= 20 &&
         state.highCrossingStage1cAttemptedAtBestCrossings !==
           state.bestCrossingCount) {

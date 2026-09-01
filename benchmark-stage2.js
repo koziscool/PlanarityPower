@@ -183,10 +183,14 @@ function runPuzzle(index, sourceGraph, maxMoves) {
   if (process.env.ENABLE_ANCHOR_BREAK_AUTO === '1') {
     state.enableAnchorBreakAuto = true;
   }
-  // Anchored shakeup is on by default (fires only on stalls, graphs >= floor).
-  // Disable it for baseline A/B comparisons; override the size floor if needed.
-  if (process.env.DISABLE_ANCHORED_SHAKEUP === '1') {
-    state.enableAnchoredShakeup = false;
+  // Anchored shakeup is OFF by default (kept in-tree pending a refactor).
+  // Enable it to exercise the tactic; override the size floor if needed.
+  if (process.env.ENABLE_ANCHORED_SHAKEUP === '1') {
+    state.enableAnchoredShakeup = true;
+  }
+  // Wide Stage 1 stall rescue is OFF by default. Enable it to exercise it.
+  if (process.env.ENABLE_WIDE_STAGE1 === '1') {
+    state.enableWideStage1 = true;
   }
   if (process.env.ANCHORED_SHAKEUP_MIN) {
     state.anchoredShakeupMinNodes = Number(process.env.ANCHORED_SHAKEUP_MIN);

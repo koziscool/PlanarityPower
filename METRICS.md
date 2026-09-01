@@ -112,7 +112,7 @@ in each — **allowed to overlap** (both high = the handoff/baton-exchange zone)
 | `nucleusGrowth` | independent | nucleus fraction now − W moves ago (W=15). The regime *dynamic*. |
 | `boundaryConcentration` | independent | fraction of offenders sitting on the nucleus frontier — high ⇒ growing the nucleus resolves the crossings; low ⇒ scattered. |
 | `crossingLoad` | independent | crossings/(crossings+N). |
-| `edgeLengthSlack` | independent, **provisional/untested** | max relative edge length — proxy for "distance from barycentric equilibrium," i.e. reduction still available. Shipped unvalidated; quarantine its reputation. |
+| `edgeLengthSlack` | independent, **provisional/superseded** | max relative edge length — proxy for "distance from barycentric equilibrium," i.e. reduction still available. Shipped unvalidated; quarantine its reputation. Taken over *all* edges, so it is dominated by the long clean ones; **`dirtyEdgeStats` (section 6) is the same idea restricted to edges that actually cross**, and is the one to reach for. |
 | `freeze` / `dwell` / `trend` | **algo-DEPENDENT** | passed through from story — the "current runner has slowed" descriptor. |
 
 **Durability tags matter:** `nucleus*` / `boundaryConcentration` / `crossingLoad`
@@ -129,11 +129,88 @@ its outcome (a coin flip, dominated by algo volatility). Use them to guide the
 
 ---
 
+## 6. Dirty-edge length — `dirtyEdgeStats(graph)`
+
+Edge lengths split by whether the edge takes part in a crossing. A **dirty** edge
+crosses something; a clean edge does not. Clean edges may be arbitrarily long and
+are ignored except as the scale normaliser.
+
+The idea: a long dirty edge spans the drawing and conflicts with whatever lies
+along it; a short one keeps the trouble local. So this measures **how localized the
+remaining conflict is** — something a crossing count cannot express, since the same
+count describes a scattered mess and a single tight knot alike.
+
+| field | meaning |
+|---|---|
+| `medianDirtyRatio` | `medianDirty / medianClean` — **the discriminating form**, see below |
+| `maxDirtyRatio` | `maxDirty / medianClean` — wider range, but separates worse in every band |
+| `dirtyCount` / `cleanCount` | set sizes; both ratios get noisy when `dirtyCount` is small |
+| `maxDirty`, `medianDirty`, `sumDirty`, `medianClean` | raw lengths — **not comparable across frames**, see below |
+| `worstDirtyEdgeIndex` | argmax. Names an edge rather than summarising the drawing |
+
+**Always use the ratio forms.** Raw lengths confound with global contraction of the
+whole drawing; only the ratio against `medianClean` is comparable between frames.
+
+**Relationship to `edgeLengthSlack` (section 5).** Same family, and this supersedes
+it as a localization measure. `edgeLengthSlack` is `maxLength / median` over *all*
+edges, so it is dominated by the long **clean** edges — which is the plausible
+reason it never earned its keep and is still tagged provisional. Restricting to
+dirty edges is the change that makes the quantity mean something.
+
+Cost is nil: reads the `link.intersection` flags that `intersections()` already sets
+as a side effect, so it is O(E) with no crossing tests of its own. It is therefore
+valid **only immediately after an `intersections()` call** — the incremental
+`countEdgeCrossings()` does not maintain those flags.
+
+### Measured, 60v, 40 runs of this solver (32 solved / 8 failed)
+
+At matched crossing count, runs that go on to fail carry longer dirty edges — but
+**only in the deep endgame**, and only in the median. Ratio is failed/solved, so
+1.00 means no separation:
+
+| crossings | `medianDirtyRatio` sol / fail | ratio | `maxDirtyRatio` ratio |
+|---|---|---|---|
+| 3–5 | 1.67 / 7.08 | **4.23** | 2.81 |
+| 5–8 | 2.46 / 3.83 | 1.56 | 1.21 |
+| 8–12 | 1.89 / 3.59 | 1.90 | 1.46 |
+| 12–20 | 2.21 / 2.73 | 1.24 | 0.96 |
+| 20–30 | 2.28 / 2.40 | 1.05 | 0.93 |
+| 30–50 | 2.12 / 2.20 | 1.04 | 0.98 |
+
+Two things follow, and both are easy to get backwards:
+
+- **The usable band is below ~12 crossings**, strongest below 5. From 20 up there
+  is nothing — 1.04–1.05 is noise, on 229+ failed samples, so this is a real
+  absence and not a small sample. Steering above that band acts on noise.
+- **Median beats max in every band.** `maxDirtyRatio` has far more dynamic range,
+  which makes it look like the better signal, and it is the one that stands out
+  when watching a Tutte relaxation. It is not the one that separates outcomes here.
+
+**Honest limits.** Failed runs *accumulate* samples in the band they are stuck in,
+so part of any gap is "sitting at 4 crossings for 54 moves" rather than "long dirty
+edges cause failure." And the 3–5 band rests on 35 failed samples. Sound as a
+diagnostic; the causal claim rests on an A/B, not on this table.
+
+**Provenance — the numbers above replace an earlier set that were wrong.** The
+first calibration ran a harness that did not reproduce `benchmark-stage2.js`: it
+omitted `setDeterministicClock(true)` and the post-generation RNG re-seed
+(`benchmark-stage2.js:472,475`). That solver solved 53% where the benchmark solves
+71%, and it reported the separation peaking at 20–40 crossings with the *max* —
+both of which reverse under the corrected harness. **Validate any trace harness by
+reproducing a known benchmark seed before reading science off it**; the fixed one
+returns 15/20 on seed 2, matching exactly.
+
+Consumed by the Stage 1 tie-break (`ctx.dirtySteering` in `runDescentPass`), which
+is a separate question from the metric's validity — see `ALGO_ARCHIVE.md`.
+
+---
+
 ## Where each is computed
 
 | metric set | function | live? | file |
 |---|---|---|---|
 | progress | `computeProgressMetrics` | yes | solver.js |
+| dirty-edge length | `dirtyEdgeStats` | on demand (O(E), after `intersections()`) | solver.js |
 | story / cascade-state | `createStoryState` + `updateStoryMetrics` | yes (per move) | solver.js |
 | regime | `createRegimeState` + `computeRegimeMetrics` | yes (per move) | solver.js |
 | cascade onset | `findCascadeOnset` | no (retrospective) | annotate-history.js |

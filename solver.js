@@ -443,7 +443,56 @@
     }
     return crossingCount;
   }
-  
+
+  // Same sweep as countEdgeCrossings, but additionally totals the length of every
+  // edge caught up in one of those crossings -- both the incident edge and the
+  // thing it hits. Folded into the existing loop, so it costs no extra intersect
+  // tests; only a Set and a few sqrts on the edges actually charged.
+  //
+  // What it measures is deliberately local: "the total length of edges party to a
+  // conflict THIS vertex is in." It is not a delta of the global maxDirty from
+  // dirtyEdgeStats -- computing that per probe would cost a full O(E^2) rescan.
+  // For choosing among candidate positions for one vertex it is the right scope,
+  // since the conflicts elsewhere are unaffected by where this vertex goes. Lower
+  // is better: the vertex's conflicts should involve short edges.
+  function countEdgeCrossingsWithDirtyLength(graph, edges) {
+    var edgeSet = new Set(edges);
+    var charged = new Set();
+    var crossingCount = 0;
+    var dirtyLength = 0;
+
+    function charge(edge) {
+      if (charged.has(edge)) return;
+      charged.add(edge);
+      dirtyLength += pointDistance(edge[0], edge[1]);
+    }
+
+    for (var i = 0; i < edges.length; i++) {
+      var edge = edges[i];
+      for (var j = 0; j < graph.links.length; j++) {
+        var other = graph.links[j];
+        if (edgeSet.has(other)) continue;
+        if (shareEndpoint(edge, other)) continue;
+        if (intersect(edge, other)) {
+          crossingCount++;
+          charge(edge);
+          charge(other);
+        }
+      }
+    }
+    for (var a = 0; a < edges.length; a++) {
+      for (var b = a + 1; b < edges.length; b++) {
+        if (shareEndpoint(edges[a], edges[b])) continue;
+        if (intersect(edges[a], edges[b])) {
+          crossingCount++;
+          charge(edges[a]);
+          charge(edges[b]);
+        }
+      }
+    }
+    return { crossings: crossingCount, dirtyLength: dirtyLength };
+  }
+
   // Evaluate a node move incrementally - returns crossing delta (negative = improvement)
   // Much faster than full intersections() call: O(degree × E) vs O(E²)
   function evaluateMoveDelta(graph, node, newX, newY, baseCount) {
@@ -3146,6 +3195,55 @@
       nearCleanRatio: nearCleanRatio,
       topCrossingShare: analysis.topCrossingShare || 0,
       progress: progress
+    };
+  }
+
+  // dirtyEdgeStats: length statistics split by whether an edge takes part in a
+  // crossing. A "dirty" edge crosses something; a clean edge does not.
+  //
+  // The idea this serves: a long dirty edge spans the drawing and conflicts with
+  // whatever lies along it, while a short one keeps the trouble local. Clean edges
+  // may be arbitrarily long and are ignored except as the scale normaliser --
+  // raw lengths are meaningless alone, since a whole drawing can contract.
+  //
+  // Distinct from edgeLengthSlack (computeRegimeMetrics), which is maxLength over
+  // the median of ALL edges and so is dominated by the long clean ones.
+  //
+  // Reads link.intersection, which intersections() sets as a side effect, so this
+  // is O(E) with no crossing tests of its own -- but it is valid ONLY immediately
+  // after an intersections() call over the current positions. The incremental
+  // countEdgeCrossings() does not maintain those flags.
+  function dirtyEdgeStats(graph) {
+    var links = graph.links;
+    var dirty = [], clean = [];
+    var maxDirty = 0, maxDirtyIndex = -1, sumDirty = 0;
+
+    for (var i = 0; i < links.length; i++) {
+      var length = pointDistance(links[i][0], links[i][1]);
+      if (links[i].intersection) {
+        dirty.push(length);
+        sumDirty += length;
+        if (length > maxDirty) { maxDirty = length; maxDirtyIndex = i; }
+      } else {
+        clean.push(length);
+      }
+    }
+
+    var medianClean = median(clean);
+    return {
+      dirtyCount: dirty.length,
+      cleanCount: clean.length,
+      maxDirty: maxDirty,
+      medianDirty: median(dirty),
+      sumDirty: sumDirty,
+      medianClean: medianClean,
+      // Scale-free forms. These are the comparable ones; the raw lengths above
+      // confound with global contraction of the drawing.
+      maxDirtyRatio: medianClean > 0 ? maxDirty / medianClean : 0,
+      medianDirtyRatio: medianClean > 0 ? median(dirty) / medianClean : 0,
+      // The argmax names an edge rather than summarising the whole drawing,
+      // which is the property a scalar count does not have.
+      worstDirtyEdgeIndex: maxDirtyIndex
     };
   }
 
@@ -6546,9 +6644,27 @@
 
     var bestMove = null;
     var bestImprovement = 0;
+    var bestDirtyReduction = -Infinity;
     var positionsTested = 0;
     var deterministicTested = 0;
     var randomTested = 0;
+
+    // Dirty-length steering. When on, positions that are TIED on crossings are
+    // broken in favour of the one that shortens this vertex's conflicts most.
+    // Crossings still come first and a strictly better crossing result always
+    // wins, so descent stays monotone -- this only decides which of several
+    // equally-good-by-crossings moves to take, and so costs no crossing progress.
+    //
+    // The aim is not to escape a stall but to control where the stall lands: a
+    // localized stuck state is one the endgame strategies (dominant barrier,
+    // contained triangle, separating-triangle finisher) can actually recognise,
+    // where a scattered one gives them nothing to fire on.
+    //
+    // Compared as a REDUCTION (before - after), not an absolute. Absolute dirty
+    // length is scoped to one vertex's conflicts, so across candidate vertices
+    // the smallest absolute would just be whichever vertex has fewest conflicts.
+    var steer = !!ctx.dirtySteering;
+    var dirtyBefore = 0;   // set per candidate vertex by the loops below
 
     function testPosition(item, edges, crossingsBefore, x, y, strategy) {
       x = Math.max(0.02, Math.min(0.98, x));
@@ -6558,15 +6674,25 @@
       var oldX = item.node[0], oldY = item.node[1];
       item.node[0] = x;
       item.node[1] = y;
-      var crossingsAfter = countEdgeCrossings(graph, edges);
+      var crossingsAfter, dirtyReduction = 0;
+      if (steer) {
+        var probe = countEdgeCrossingsWithDirtyLength(graph, edges);
+        crossingsAfter = probe.crossings;
+        dirtyReduction = dirtyBefore - probe.dirtyLength;
+      } else {
+        crossingsAfter = countEdgeCrossings(graph, edges);
+      }
       item.node[0] = oldX;
       item.node[1] = oldY;
 
       positionsTested++;
       var improvement = crossingsBefore - crossingsAfter;
-      if (improvement > bestImprovement &&
-          !wouldOscillate(state, item.index, x, y)) {
+      var wins = improvement > bestImprovement ||
+        (steer && improvement > 0 && improvement === bestImprovement &&
+         dirtyReduction > bestDirtyReduction);
+      if (wins && !wouldOscillate(state, item.index, x, y)) {
         bestImprovement = improvement;
+        bestDirtyReduction = dirtyReduction;
         bestMove = {
           node: item.node,
           nodeIndex: item.index,
@@ -6587,7 +6713,14 @@
       var item = candidates[r];
       var node = item.node;
       var edges = getNodeEdges(graph, node);
-      var crossingsBefore = countEdgeCrossings(graph, edges);
+      var crossingsBefore;
+      if (steer) {
+        var before = countEdgeCrossingsWithDirtyLength(graph, edges);
+        crossingsBefore = before.crossings;
+        dirtyBefore = before.dirtyLength;
+      } else {
+        crossingsBefore = countEdgeCrossings(graph, edges);
+      }
       var neighbors = getNeighbors(graph, node);
 
       if (spec.centroid && neighbors.length > 0) {
@@ -6630,7 +6763,14 @@
       for (var r2 = 0; r2 < candidates.length; r2++) {
         var item2 = candidates[r2];
         var edges2 = getNodeEdges(graph, item2.node);
-        var crossingsBefore2 = countEdgeCrossings(graph, edges2);
+        var crossingsBefore2;
+        if (steer) {
+          var before2 = countEdgeCrossingsWithDirtyLength(graph, edges2);
+          crossingsBefore2 = before2.crossings;
+          dirtyBefore = before2.dirtyLength;
+        } else {
+          crossingsBefore2 = countEdgeCrossings(graph, edges2);
+        }
         for (var s = 0; s < spec.randomSamples; s++) {
           randomTested++;
           if (testPosition(item2, edges2, crossingsBefore2,
@@ -6694,12 +6834,25 @@
       ? Math.random() * Math.PI * 2
       : options.theta;
 
+    // Trickle-phase gate for dirty-length steering. Calibrated on 60v traces from
+    // this solver (30 runs, 16 solved / 14 failed), not from Tutte -- Tutte never
+    // stalls, so its trajectories say nothing about where this one gets stuck.
+    //
+    // Two things located the threshold. Descent rate collapses below ~40
+    // crossings (median moves per crossing-drop: 0.76 above 80, 1.22 at 40-80,
+    // then 2.53 at 20-40). And dirty-edge length only separates eventual solves
+    // from eventual failures in that same region -- maxDirty/medianClean runs
+    // 8.5 vs 15.3 at 20-40 crossings, but 7.9 vs 8.4 above 160, i.e. no signal.
+    // Steering above the threshold would be acting on noise.
+    var dirtySteeringMax = state.dirtySteeringMaxCrossings === undefined
+      ? 40 : state.dirtySteeringMaxCrossings;
     var ctx = {
       graph: graph,
       state: state,
       count: count,
       strongImprovement: strongImprovement,
-      theta: theta
+      theta: theta,
+      dirtySteering: !!state.enableDirtySteering && count <= dirtySteeringMax
     };
 
     var listKind = 'main';
@@ -9051,6 +9204,7 @@
   exports.findClumps = findClumps;
   exports.analyzeGraphState = analyzeGraphState;
   exports.computeProgressMetrics = computeProgressMetrics;
+  exports.dirtyEdgeStats = dirtyEdgeStats;
   exports.createStoryState = createStoryState;
   exports.updateStoryMetrics = updateStoryMetrics;
   exports.createRegimeState = createRegimeState;

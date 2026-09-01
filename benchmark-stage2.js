@@ -195,6 +195,14 @@ function runPuzzle(index, sourceGraph, maxMoves) {
   if (process.env.ANCHORED_SHAKEUP_MIN) {
     state.anchoredShakeupMinNodes = Number(process.env.ANCHORED_SHAKEUP_MIN);
   }
+  // Dirty-length steering is OFF by default. When on, Stage 1 breaks ties between
+  // equally-crossing-reducing positions in favour of shortening dirty edges.
+  if (process.env.ENABLE_DIRTY_STEERING === '1') {
+    state.enableDirtySteering = true;
+  }
+  if (process.env.DIRTY_STEERING_MAX) {
+    state.dirtySteeringMaxCrossings = Number(process.env.DIRTY_STEERING_MAX);
+  }
   const strategies = {};
   const crossingHistory = [initialCrossings];
   const extensionPlans = [];

@@ -19,10 +19,43 @@
 
 (function(exports) {
 
+  // Deterministic clock. Reproducible substitute for Date.now() so that the
+  // structural searches' time budgets cut at the same place on every run.
+  //
+  // It advances two ways:
+  //
+  //   stepMs     - a fixed tick per call to now(). This alone was the original
+  //                design, and it does not work: "timeBudgetMs" then means "that
+  //                many CHECKPOINTS", not that much work. A search that polls the
+  //                clock only at its outer loop boundaries burns a handful of
+  //                ticks and runs to completion however expensive it is. Measured
+  //                before this change: region-compaction spent 10.9 REAL seconds
+  //                per call against a nominal 600 ms budget, and accounted for 75%
+  //                of total benchmark runtime.
+  //
+  //   workPerMs  - ticks charged in proportion to crossing tests actually
+  //                performed, which is where essentially all the time goes. This
+  //                makes a logical millisecond mean roughly a real one, at any
+  //                graph size, without adding poll sites to hot loops and so
+  //                without changing what any existing budget means.
+  //
+  // The charge is computed analytically from edge counts, so it costs nothing per
+  // iteration and stays exactly reproducible.
+  //
+  // workPerMs is calibrated EMPIRICALLY against solver.html, not from this
+  // machine's throughput -- the point is that headless reproduces the regime
+  // actually being optimised for. Timing intersections() here suggested ~50000
+  // pair tests per ms, but that binds the budgets far harder than the browser
+  // does: it gave 46.7% at 60v against solver.html's ~56-58%. 150000 lands at
+  // 57.5%. Re-calibrate against solver.html, never against a microbenchmark.
+  //
+  // Set workPerMs to 0 to disable work charging and get the old checkpoint-only
+  // behaviour, under which the budgets never bind at all. Useful for A/B.
   var deterministicClock = {
     enabled: false,
     tick: 0,
-    stepMs: 1
+    stepMs: 1,
+    workPerMs: 150000
   };
 
   function now() {
@@ -31,11 +64,19 @@
     return deterministicClock.tick;
   }
 
+  // Charge the logical clock for a batch of crossing tests just performed.
+  function chargeClockWork(pairTests) {
+    if (!deterministicClock.enabled || !deterministicClock.workPerMs) return;
+    deterministicClock.tick += pairTests / deterministicClock.workPerMs;
+  }
+
   function setDeterministicClock(enabled, options) {
     options = options || {};
     deterministicClock.enabled = Boolean(enabled);
     deterministicClock.tick = options.startMs || 0;
     deterministicClock.stepMs = options.stepMs || 1;
+    deterministicClock.workPerMs = options.workPerMs === undefined
+      ? 150000 : options.workPerMs;
   }
 
   function getClockState() {
@@ -222,6 +263,9 @@
       addProfileCost('intersections', profileNow() - profileStarted,
         pairTests, n);
     }
+    // Analytic pair count -- the loop above is every unordered pair. Computed
+    // rather than counted so this costs nothing per iteration.
+    chargeClockWork(n * (n - 1) / 2);
     return count;
   }
   
@@ -441,6 +485,9 @@
       addProfileCost('edgeCrossings', profileNow() - profileStarted,
         pairTests, graph.links.length);
     }
+    // edges x all links, plus the within-set pairs.
+    chargeClockWork(edges.length * graph.links.length +
+      edges.length * (edges.length - 1) / 2);
     return crossingCount;
   }
 
@@ -490,6 +537,8 @@
         }
       }
     }
+    chargeClockWork(edges.length * graph.links.length +
+      edges.length * (edges.length - 1) / 2);
     return { crossings: crossingCount, dirtyLength: dirtyLength };
   }
 
@@ -722,6 +771,7 @@
       }
     }
 
+    chargeClockWork(links.length * (links.length - 1) / 2);
     return counts;
   }
 

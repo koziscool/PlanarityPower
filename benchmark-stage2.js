@@ -481,8 +481,12 @@ const graphBatch = generateBatch(config.puzzles, config.nodes, config.seed);
 const graphSignatures = graphBatch.map(graphSignature);
 Math.random = seededRandom(config.seed ^ 0x9e3779b9);
 const realDateNow = Date.now.bind(Date);
+// WORK_PER_MS calibrates the logical clock against real crossing-test throughput
+// (default 50000, measured near n=60). Set WORK_PER_MS=0 to charge no work and get
+// the old checkpoint-only clock, under which the search time budgets never bind.
 if (config.deterministicClock) {
-  solver.setDeterministicClock(true);
+  solver.setDeterministicClock(true, process.env.WORK_PER_MS === undefined
+    ? {} : { workPerMs: Number(process.env.WORK_PER_MS) });
 } else if (solver.setDeterministicClock) {
   solver.setDeterministicClock(false);
 }

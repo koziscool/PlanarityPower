@@ -184,12 +184,32 @@ O(E²·n)), `findSeparatingTriangles` (`:3523`), and `cloneGraph` (`:3438`, O(E�
 which is itself called inside inner search loops.
 
 The fix pattern already exists in this file: `analyzeEstablishedRegion` (`:745`)
-and `computeRegimeMetrics` (`:3393`) build a `Map` once. Applying that to the
-handful above is mechanical and behaviour-preserving.
+and `computeRegimeMetrics` (`:3393`) build a `Map` once.
 
-This matters beyond speed. The structural searches stop on a time budget, so
-making them faster changes *how many candidates they explore* — i.e. it is a
-behaviour change and must be benchmarked, not assumed safe.
+**Correction — this section originally overstated the win.** Measured, replacing
+`nodes.indexOf` with a `Map` in `getCrossingCounts` is worth only **~1.2×**
+(n=60: 0.68 ms → 0.52 ms; n=150: 3.20 → 2.56, output identical). The reason is
+that `indexOf` runs only on pairs that *actually cross*, not on every pair — the
+O(E²) `intersect` calls dominate and index-mapping does not touch them. "Linear
+scan inside a quadratic loop" was inferred rather than measured.
+
+**Where the real win is: full recounts where incremental would do.**
+`simulateAnchorBreakTransfer` calls `intersections()` — a full O(E²) sweep — once
+per transfer position, once after the transfer, and once per repair step. For a
+~10-vertex component with 6 repairs that is ~18 full recounts per candidate. But
+moving one vertex only changes crossings on its incident edges, and
+`countEdgeCrossings` already does exactly that at O(deg·E): ~1,000 tests instead
+of ~14,000 at n=60, roughly **14×**. Not free — keeping a correct running total
+from incremental deltas is the fiddly part, and getting it wrong would corrupt
+accept/reject decisions silently. `evaluateMoveDelta` is the existing pattern.
+
+**And since the clock fix, this is a solve-rate lever, not a speed one.** Time
+budgets now cap *work done* (see `CONTROLLER_MAP.md`). A faster function buys more
+candidates examined per call, which converts directly into solve rate — and
+conversely, a controller-level improvement that routes more work to a starved
+function will underperform for reasons that have nothing to do with the
+controller. That inverts the caveat this section originally carried: search
+efficiency is no longer a risk to be benchmarked around, it is the mechanism.
 
 ---
 
